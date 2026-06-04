@@ -27,13 +27,20 @@ exp_template_ocr.py — Template/shape-matching OCR for MapleStory EXP display
 
 from __future__ import annotations
 import os
+import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
 
 # ── 設定 ──────────────────────────────────────────────────────────────────────
-TEMPLATE_DIR = Path(__file__).parent / "templates"
+# 打包成 exe（PyInstaller）時，資料會解壓到 sys._MEIPASS；用它找 templates，
+# 否則用本檔所在目錄。
+if getattr(sys, "frozen", False):
+    _BASE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+else:
+    _BASE = Path(__file__).resolve().parent
+TEMPLATE_DIR = _BASE / "templates"
 
 FILE_CHAR = {
     '0': '0', '1': '1', '2': '2', '3': '3', '4': '4',
@@ -161,33 +168,78 @@ class TemplateOCR:
         return best, best_s
 
     # ── 主辨識 ───────────────────────────────────────────────────────────────
-    def recognize(self, mask: np.ndarray) -> dict:
+    @staticmethod
+    def _isolate_text(mask):
+        """
+        從可能含雜訊（金色活動 UI 的點狀線/條紋）的遮罩中，切出真正的文字區塊。
+          1. 欄位「墨水高度」>門檻者視為文字欄；取最大的一團（容忍字距空隙）。
+          2. 該團內，列方向取「最高的一段連續密集列」= 數字本體，
+             去掉上/下方的點狀雜訊線。
+        回傳裁切後的遮罩；找不到就原樣回傳。
+        """
+        if mask.size == 0:
+            return mask
+        colcov = np.sum(mask > 0, axis=0)
+        xs = np.where(colcov > 16)[0]
+        if len(xs) == 0:
+            return mask
+        # 欄位分群（字距空隙 <=150px 視為同一塊）
+        clusters, s, p = [], xs[0], xs[0]
+        for x in xs[1:]:
+            if x - p > 150:
+                clusters.append((s, p)); s = x
+            p = x
+        clusters.append((s, p))
+        a, b = max(clusters, key=lambda c: int(colcov[c[0]:c[1]+1].sum()))
+        tb = mask[:, max(0, a - 10):b + 11]
+        # 列方向取最高的一段
+        Wt = tb.shape[1]
+        rc = np.sum(tb > 0, axis=1)
+        on = rc >= 0.12 * Wt
+        ys = np.where(on)[0]
+        if len(ys) == 0:
+            return tb
+        groups, s, p = [], ys[0], ys[0]
+        for y in ys[1:]:
+            if y - p > 3:
+                groups.append((s, p)); s = y
+            p = y
+        groups.append((s, p))
+        ry0, ry1 = max(groups, key=lambda g: g[1] - g[0])
+        return tb[max(0, ry0 - 3):ry1 + 4, :]
+
+    def recognize(self, mask: np.ndarray, debug: bool = False) -> dict:
         """
         輸入：乾淨白字黑底遮罩（build_mask 的輸出）。
-        回傳 dict：
-          exp   : EXP 數字字串（純數字，無逗號）或 None
-          pct   : 百分比字串 "DD.DDD" 或 None
-          conf  : 平均 NCC 信心值
-          ok    : 是否成功解析出 exp 與 pct
+        回傳 dict：exp / pct / conf / ok，debug=True 時另含 reason 與中間量。
         """
-        out = {"exp": None, "pct": None, "conf": 0.0, "ok": False}
-        # 水平裁切到內容
+        out = {"exp": None, "pct": None, "conf": 0.0, "ok": False,
+               "reason": "", "n_runs": 0, "widths": [], "pct_idx": None, "lb_idx": None}
+
+        if mask.size == 0 or not np.any(mask > 0):
+            out["reason"] = "empty_mask"
+            return out
+        # 先切出文字區塊（去除金色活動 UI 等雜訊）
+        mask = self._isolate_text(mask)
         cs = np.sum(mask > 0, axis=0)
         on = np.where(cs > 0)[0]
         if len(on) == 0:
+            out["reason"] = "empty_mask"
             return out
         mask = mask[:, max(0, on[0] - 4):on[-1] + 5]
 
         runs = self._runs(mask)
-        # 丟掉開頭細假影
         while runs and (runs[0][1] - runs[0][0] + 1) <= ARTIFACT_W:
             runs.pop(0)
+        out["n_runs"] = len(runs)
+        out["widths"] = [b - a + 1 for a, b in runs]
         if len(runs) < MIN_RUNS:
+            out["reason"] = f"too_few_runs({len(runs)})"
             return out
 
-        widths = [b - a + 1 for a, b in runs]
+        widths = out["widths"]
 
-        # 錨點：% （最寬、且 NCC 對 % 高）→ 由右往左找
+        # 錨點：% （由右往左找最寬/最像 % 的）
         pct_idx = None
         for i in range(len(runs) - 1, -1, -1):
             ch, sc = self._match(mask[:, runs[i][0]:runs[i][1] + 1], ['%'])
@@ -195,7 +247,9 @@ class TemplateOCR:
                 pct_idx = i
                 break
         if pct_idx is None:
+            out["reason"] = "no_pct_anchor"
             return out
+        out["pct_idx"] = pct_idx
 
         # 錨點：[ （在 % 之前找最像 [ 的）
         lb_idx, best_lb = None, -2.0
@@ -204,11 +258,11 @@ class TemplateOCR:
             if sc > best_lb:
                 best_lb, lb_idx = sc, i
         if lb_idx is None or lb_idx == 0:
+            out["reason"] = "no_lbracket"
             return out
+        out["lb_idx"] = lb_idx
 
         confs = []
-
-        # EXP 區：數字 + 逗號
         exp = ""
         for a, b in runs[:lb_idx]:
             ch, sc = self._match(mask[:, a:b + 1], DIGITS + [','])
@@ -216,7 +270,6 @@ class TemplateOCR:
             if ch and ch != ',':
                 exp += ch
 
-        # pct 區：固定格式，先找小數點（最窄的 run）其餘強制數字
         pct_runs = runs[lb_idx + 1:pct_idx]
         pct = self._parse_pct(mask, pct_runs, confs)
 
@@ -224,6 +277,8 @@ class TemplateOCR:
         out["exp"] = exp if exp.isdigit() and len(exp) >= 6 else None
         out["pct"] = pct
         out["ok"] = out["exp"] is not None and pct is not None
+        out["reason"] = "ok" if out["ok"] else (
+            "exp_fail" if out["exp"] is None else "pct_fail")
         return out
 
     def _parse_pct(self, mask, pct_runs, confs) -> str | None:

@@ -1,12 +1,27 @@
 @echo off
 cd /d "%~dp0"
+echo ============================================
+echo   EXPMonitor  build  (PyInstaller, onedir)
+echo ============================================
+echo.
 
 echo [1/3] Installing packages...
-pip install pyinstaller PyQt5 pyqtgraph numpy mss pytesseract easyocr pywin32 --quiet
+pip install pyinstaller PyQt5 pyqtgraph numpy opencv-python mss pywin32 Pillow pytesseract --quiet
 if errorlevel 1 ( echo pip failed & pause & exit /b 1 )
 
-echo [2/3] Building with PyInstaller...
-pyinstaller --noconfirm --onedir --windowed --name "EXPMonitor" --add-data "exp_monitor.py;." --hidden-import win32gui --hidden-import win32con --hidden-import win32ui --hidden-import win32api --hidden-import pywintypes --hidden-import mss --hidden-import mss.windows --hidden-import pytesseract --hidden-import easyocr --hidden-import pyqtgraph --hidden-import numpy --hidden-import cv2 exp_monitor_qt.py
+echo [2/3] Building EXE...
+pyinstaller --noconfirm --onedir --windowed --name "EXPMonitor" ^
+  --add-data "exp_monitor.py;." ^
+  --add-data "exp_template_ocr.py;." ^
+  --add-data "templates;templates" ^
+  --hidden-import win32gui --hidden-import win32con --hidden-import win32ui ^
+  --hidden-import win32api --hidden-import pywintypes ^
+  --hidden-import mss --hidden-import mss.windows ^
+  --hidden-import pyqtgraph --hidden-import numpy --hidden-import cv2 ^
+  --hidden-import pytesseract ^
+  --exclude-module easyocr --exclude-module torch --exclude-module torchvision ^
+  --exclude-module matplotlib --exclude-module tkinter ^
+  exp_monitor_qt.py
 if errorlevel 1 ( echo Build failed & pause & exit /b 1 )
 
 echo [3/3] Cleaning up...
@@ -14,7 +29,10 @@ if exist build rmdir /s /q build
 if exist EXPMonitor.spec del /q EXPMonitor.spec
 
 echo.
-echo Done! Output: dist\EXPMonitor\EXPMonitor.exe
-echo Note: Tesseract must be installed separately and added to PATH.
+echo ============================================
+echo   Done!  ->  dist\EXPMonitor\EXPMonitor.exe
+echo ============================================
+echo   templates\ and the recognition core are bundled inside.
+echo   (Optional) Tesseract fallback: install Tesseract-OCR and add to PATH.
 echo.
 pause

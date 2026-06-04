@@ -1,264 +1,115 @@
 #!/usr/bin/env python3
 """
-exp_monitor_debug.py -- OCR debug session recorder
-====================================================
-每幀儲存所有中間圖片 + 模擬主程式驗證層，幫助找出誤報原因。
+exp_monitor_debug.py -- OCR 診斷錄影機（新版：使用 template OCR）
+================================================================
+用「新的模板辨識器 + ExpTracker」逐幀錄影並記錄失敗原因，
+方便在真實遊戲上確認辨識器準不準、或找出線上失敗的原因。
 
-Usage:
-    python exp_monitor_debug.py
-    python exp_monitor_debug.py --interval 0.5 --frames 200
+用法：
+    python exp_monitor_debug.py            # 連續錄到 Ctrl+C
+    python exp_monitor_debug.py -n 8       # 錄 8 幀就停
+    python exp_monitor_debug.py -i 0.5     # 每 0.5 秒一幀
 
-Output: debug_YYYYMMDD_HHMMSS/
-    session.csv
-    NNNNN_raw.png         原始截圖條
-    NNNNN_annotated.png   標注 EXP row 位置
-    NNNNN_exprow.png      裁切的 EXP row
-    NNNNN_HSV.png         HSV 遮罩 (5x)
-    NNNNN_Otsu.png        Otsu 二值化 (5x)
-    NNNNN_Bright.png      亮度遮罩 (5x)
+輸出：debug_YYYYMMDD_HHMMSS/
+    NNNNN_raw.png        原始底部條
+    NNNNN_mask.png       新辨識器實際看到的遮罩（白字黑底）
+    session.csv          每幀：raw_exp / pct / conf / reason / n_runs / widths / 追蹤輸出
 """
-
-import os, sys, cv2, csv, time, json, argparse, importlib.util
-import numpy as np
+import os, sys, csv, time, json, argparse, importlib.util
 from datetime import datetime
 from pathlib import Path
+import cv2, numpy as np
 
-# ── 載入核心模組 ──────────────────────────────────────────────────────────────
-_HERE = Path(__file__).parent
-_spec = importlib.util.spec_from_file_location("exp_core", _HERE / "exp_monitor.py")
-_mod  = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
+HERE = Path(__file__).parent
+_spec = importlib.util.spec_from_file_location("expmon", HERE / "exp_monitor.py")
+M = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(M)
+from exp_template_ocr import TemplateOCR, ExpTracker, build_mask
 
-find_window        = _mod.find_window
-capture_strip      = _mod.capture_strip
-find_exp_bar_rows  = _mod.find_exp_bar_rows
-find_exp_text_cols = _mod.find_exp_text_cols
-find_fill_boundary = _mod.find_fill_boundary
-preprocess         = _mod.preprocess
-run_ocr            = _mod.run_ocr
-parse              = _mod.parse
-_setup_tess        = _mod._setup_tess
-_init_easy         = _mod._init_easy
-set_dpi_awareness  = _mod.set_dpi_awareness
-_has_exp_yellow    = _mod._has_exp_yellow
-
-# ── CLI ───────────────────────────────────────────────────────────────────────
 ap = argparse.ArgumentParser()
-ap.add_argument("--interval", "-i", type=float, default=1.0)
-ap.add_argument("--frames",   "-n", type=int,   default=0)
-ap.add_argument("--threshold","-t", type=float, default=1.0,
-                help="Layer-1 max_exp 容差 %（與主程式相同，預設 1.0）")
+ap.add_argument("-i", "--interval", type=float, default=1.0)
+ap.add_argument("-n", "--frames",   type=int,   default=0, help="0=無限，直到 Ctrl+C")
 args = ap.parse_args()
 
-# ── Session ───────────────────────────────────────────────────────────────────
-ts_start   = datetime.now()
-session_id = ts_start.strftime("%Y%m%d_%H%M%S")
-out_dir    = _HERE / f"debug_{session_id}"
+session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+out_dir = HERE / f"debug_{session_id}"
 out_dir.mkdir(parents=True, exist_ok=True)
 
-CSV_FIELDS = [
-    "frame", "timestamp",
-    "status",
-    "cap_method", "has_yellow",
-    "row_y0", "row_y1",
-    "best_mask", "best_raw",
-    "pct", "exp",
-    "cur_max_exp", "max_exp_est", "max_exp_dev_pct",
-    "val_result",
-    "all_masks",
-]
+CSV_FIELDS = ["frame","timestamp","status","cap_method","win_w","win_h",
+              "raw_exp","pct","conf","reason","n_runs","widths",
+              "track_exp","track_pct","track_reason"]
 
-# ── OCR init ──────────────────────────────────────────────────────────────────
-set_dpi_awareness()
-use_tess = _setup_tess()
-if not use_tess:
-    _init_easy()
+M.set_dpi_awareness()
+ocr = TemplateOCR()
+if not ocr.is_ready():
+    print("[ERROR] 模板未就緒（templates/ 不完整）"); sys.exit(1)
+tracker = ExpTracker()
 
-print(f"\n{'='*68}")
-print(f"  EXP Monitor Debug  --  {session_id}")
-print(f"  OCR: {'Tesseract' if use_tess else 'EasyOCR'}  |  interval={args.interval}s  |  threshold={args.threshold}%")
-print(f"  Output: {out_dir}")
-print(f"{'='*68}")
-print(f"  {'#':>5}  {'time':12}  {'OCR':5}  {'Y':1}  {'row':5}  {'pct':10}  {'exp':14}  {'validate'}")
-print(f"{'─'*68}")
+print("="*70)
+print(f"  EXP Debug (template OCR)  --  {session_id}")
+print(f"  templates ready: {ocr.is_ready()}   interval={args.interval}s")
+print(f"  output: {out_dir}")
+print("="*70)
+print(f"  {'#':>4} {'time':12} {'raw_exp':16} {'pct':8} {'conf':5} {'reason':14} {'tracked'}")
+print("-"*70)
 
-# ── 模擬驗證狀態 ──────────────────────────────────────────────────────────────
-sim_max_exp_est  = None
-sim_prev_exp_int = None
-sim_prev_pct     = None
-
-def simulate_validation(pct_str, exp_str):
-    global sim_max_exp_est, sim_prev_exp_int, sim_prev_pct
-
-    result = "pass"
-    cur_max = None
-    dev_pct = ""
-    max_est_str = ""
-
-    try:
-        pct_f   = float(pct_str)
-        exp_int = int(exp_str.replace(",", "")) if exp_str else None
-
-        if exp_int and pct_f > 1.0:
-            cur_max = exp_int / (pct_f / 100.0)
-
-            if sim_max_exp_est is not None:
-                dev = abs(cur_max - sim_max_exp_est) / sim_max_exp_est
-                dev_pct     = f"{dev*100:.4f}%"
-                max_est_str = f"{sim_max_exp_est/1e12:.3f}T"
-                if dev > args.threshold / 100.0:
-                    result = f"L1 maxexp偏差{dev*100:.2f}%"
-
-            if result == "pass" and sim_prev_exp_int and exp_int < sim_prev_exp_int:
-                result = f"L2 EXP減少 {sim_prev_exp_int - exp_int:,}"
-
-            if result == "pass":
-                if sim_max_exp_est is None:
-                    sim_max_exp_est = cur_max
-                else:
-                    sim_max_exp_est = sim_max_exp_est * 0.9 + cur_max * 0.1
-                sim_prev_exp_int = exp_int
-                sim_prev_pct     = pct_f
-
-    except Exception as e:
-        result = f"err:{e}"
-
-    cur_max_str = f"{cur_max/1e12:.3f}T" if cur_max else ""
-    return result, cur_max_str, max_est_str, dev_pct
-
-
-def fmt_exp(s):
-    if not s:
-        return "—"
-    try:
-        v = int(s.replace(",", ""))
-        return f"{v/1e9:.3f}B" if v >= 1e9 else f"{v:,}"
-    except Exception:
-        return s
-
-
-# ── Main loop ─────────────────────────────────────────────────────────────────
-frame    = 0
-ok_count = 0
-
-with open(out_dir / "session.csv", "w", newline="", encoding="utf-8-sig") as csvf:
-    writer = csv.DictWriter(csvf, fieldnames=CSV_FIELDS)
-    writer.writeheader()
-
+frame = 0
+with open(out_dir / "session.csv", "w", newline="", encoding="utf-8-sig") as f:
+    w = csv.DictWriter(f, fieldnames=CSV_FIELDS); w.writeheader()
     try:
         while True:
             frame += 1
-            now_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            rec = {k: "" for k in CSV_FIELDS}
-            rec["frame"]     = frame
-            rec["timestamp"] = now_str
+            now = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            rec = {k: "" for k in CSV_FIELDS}; rec["frame"]=frame; rec["timestamp"]=now
 
-            # 1. Capture
-            hwnd, reg = find_window()
+            hwnd, reg = M.find_window()
             if hwnd is None:
-                rec["status"] = "no_window"
-                print(f"  {frame:>5}  {now_str}  NO WINDOW")
-                writer.writerow(rec)
-                csvf.flush()
-                if args.frames and frame >= args.frames:
-                    break
-                time.sleep(args.interval)
-                continue
+                rec["status"]="no_window"; w.writerow(rec); f.flush()
+                print(f"  {frame:>4} {now}  NO WINDOW")
+                if args.frames and frame>=args.frames: break
+                time.sleep(args.interval); continue
 
-            img, cap_lbl = capture_strip(hwnd, reg)
-            rec["cap_method"] = cap_lbl or "unknown"
-
+            rec["win_w"]=reg["width"]; rec["win_h"]=reg["height"]
+            img, cap = M.capture_strip(hwnd, reg)
+            rec["cap_method"]=cap or ""
             if img is None:
-                rec["status"] = "cap_fail"
-                print(f"  {frame:>5}  {now_str}  CAP FAIL ({cap_lbl})")
-                writer.writerow(rec)
-                csvf.flush()
-                if args.frames and frame >= args.frames:
-                    break
-                time.sleep(args.interval)
-                continue
+                rec["status"]="cap_fail"; w.writerow(rec); f.flush()
+                print(f"  {frame:>4} {now}  CAP FAIL ({cap})")
+                if args.frames and frame>=args.frames: break
+                time.sleep(args.interval); continue
 
-            # 2. Yellow check + save raw
-            has_yel = _has_exp_yellow(img)
-            rec["has_yellow"] = "1" if has_yel else "0"
-            cv2.imwrite(str(out_dir / f"{frame:05d}_raw.png"), img)
+            cv2.imwrite(str(out_dir/f"{frame:05d}_raw.png"), img)
+            y0,y1 = M.find_exp_bar_rows(img); band = img[y0:y1,:]
+            x0,x1 = M.find_exp_text_cols(band, img.shape[1]); row = band[:,x0:x1]
+            mask = build_mask(band)   # 用整條 band，由 recognize 內部切文字區塊（抗金色UI雜訊）
+            cv2.imwrite(str(out_dir/f"{frame:05d}_mask.png"), mask)
+            try:
+                cv2.imwrite(str(out_dir/f"{frame:05d}_block.png"), ocr._isolate_text(mask))
+            except Exception:
+                pass
 
-            # 3. EXP row detection
-            y0, y1 = find_exp_bar_rows(img)
-            rec["row_y0"] = y0
-            rec["row_y1"] = y1
+            r = ocr.recognize(mask, debug=True)
+            t = tracker.update(r["exp"], r["pct"])
 
-            ann = img.copy()
-            cv2.rectangle(ann, (0, y0), (img.shape[1]-1, max(y1-1, y0)), (0, 255, 0), 1)
-            cv2.imwrite(str(out_dir / f"{frame:05d}_annotated.png"), ann)
+            rec["status"]   = "ok" if r["ok"] else "fail"
+            rec["raw_exp"]  = r["exp"] or ""
+            rec["pct"]      = r["pct"] or ""
+            rec["conf"]     = f"{r['conf']:.3f}"
+            rec["reason"]   = r["reason"]
+            rec["n_runs"]   = r["n_runs"]
+            rec["widths"]   = json.dumps(r["widths"])
+            rec["track_exp"]= t["exp"] if t["exp"] is not None else ""
+            rec["track_pct"]= f"{t['pct']:.3f}" if t["pct"] is not None else ""
+            rec["track_reason"]= t["reason"]
+            w.writerow(rec); f.flush()
 
-            text_band = img[y0:y1, :] if y1 > y0 else img
-            x0, x1   = find_exp_text_cols(text_band, img.shape[1])
-            exp_row   = text_band[:, x0:x1]
-            rec["row_y0"] = f"{y0}(x{x0})"
-            rec["row_y1"] = f"{y1}(x{x1})"
-            cv2.imwrite(str(out_dir / f"{frame:05d}_exprow.png"), exp_row)
+            tracked = f"{t['exp']:,}" if t["exp"] is not None else "-"
+            ndig = len(r['exp']) if r['exp'] else 0
+            print(f"  {frame:>4} {now} {str(r['exp'] or '-'):16} ({ndig}d) {str(r['pct'] or '-'):8} "
+                  f"{r['conf']:.2f}  {r['reason']:14} {tracked}")
 
-            # 4. Preprocessing + OCR per mask
-            mask_results = []
-            for label, mask in preprocess(exp_row):
-                cv2.imwrite(str(out_dir / f"{frame:05d}_{label}.png"), mask)
-                raw_txt, _ = run_ocr(mask, use_tess)
-                # parse() returns (exp_integer_str, pct_str)
-                exp_v, pct_v = parse(raw_txt) if raw_txt else (None, None)
-                mask_results.append({
-                    "mask": label,
-                    "raw":  raw_txt or "",
-                    "pct":  pct_v  or "",
-                    "exp":  exp_v  or "",
-                })
-
-            rec["all_masks"] = json.dumps(mask_results, ensure_ascii=False)
-
-            # 5. Best result
-            def score(r):
-                return 2 if r["pct"] and r["exp"] else 1 if r["pct"] else 0
-
-            best = max(mask_results, key=score)
-            rec["best_mask"] = best["mask"]
-            rec["best_raw"]  = best["raw"]
-            rec["pct"]       = best["pct"]
-            rec["exp"]       = best["exp"]
-
-            if best["pct"]:
-                ok_count += 1
-                rec["status"] = "ok"
-                ocr_tag = "OK   "
-            else:
-                rec["status"] = "fail"
-                ocr_tag = "FAIL "
-
-            # 6. Simulate Layer-1 + Layer-2 validation
-            val_result, cur_max_str, max_est_str, dev_pct = simulate_validation(
-                best["pct"], best["exp"])
-            rec["cur_max_exp"]      = cur_max_str
-            rec["max_exp_est"]      = max_est_str
-            rec["max_exp_dev_pct"]  = dev_pct
-            rec["val_result"]       = val_result
-
-            yel_ch   = "Y" if has_yel else "N"
-            row_str  = f"{y0}-{y1}"
-            pct_str  = f"{best['pct']}%" if best["pct"] else f"({best['raw'][:8]!r})"
-            exp_str  = fmt_exp(best["exp"])
-            val_str  = "V:OK" if val_result == "pass" else f"V:NG {val_result[:22]}"
-            print(f"  {frame:>5}  {now_str}  {ocr_tag}  {yel_ch}  {row_str:5}  {pct_str:10}  {exp_str:14}  {val_str}")
-
-            writer.writerow(rec)
-            csvf.flush()
-
-            if args.frames and frame >= args.frames:
-                break
+            if args.frames and frame>=args.frames: break
             time.sleep(args.interval)
-
     except KeyboardInterrupt:
-        print("Stopped.")
+        print("\n停止。")
 
-elapsed  = (datetime.now() - ts_start).total_seconds()
-fail_ocr = frame - ok_count
-rate_ocr = ok_count / frame * 100 if frame else 0
-print(f"Total: {frame}  OK: {ok_count} ({rate_ocr:.1f}%)  Output: {out_dir}")
+print(f"\n完成。請把整個資料夾 {out_dir.name} 給我看（特別是 *_raw.png 與 *_mask.png）。")

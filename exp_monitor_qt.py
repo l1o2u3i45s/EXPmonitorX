@@ -359,7 +359,7 @@ class MonitorWorker(QObject):
         row       = text_band[:, x0:x1]
         best_e, best_p = None, None
         if self._ocr is not None:
-            r = self._ocr.recognize_row(row)
+            r = self._ocr.recognize_row(text_band)
             if r["exp"]:
                 best_e = f"{int(r['exp']):,}"
             if r["pct"]:
@@ -906,10 +906,17 @@ class MainWindow(QMainWindow):
         # ── EXP 整數：永遠從 max_exp × pct 推算，不依賴 OCR ──────────────
         # 原因：EXP 數字橫跨填充條邊界，部分字元不可見，OCR 必然丟失前幾位
         # max_exp 建立後，pct × max_exp 的精度足夠（誤差 < 0.001%）
+        # EXP 直接採用 OCR（模板比對）讀到的完整數字。
+        # 模板 OCR 已可靠讀出完整 15 位數；異常值交給下面的
+        # max_exp 一致性 / EXP 遞減 / 位數守衛擋掉（誤報不會畫進圖）。
         exp_int = None
-        if self._max_exp_est is not None and pct_f > 1.0:
-            exp_int = round(self._max_exp_est * pct_f / 100.0)
-            exp     = f"{exp_int:,}"
+        if exp:
+            try:
+                _v = int(exp.replace(",", ""))
+                if _v > 1_000_000_000:
+                    exp_int = _v
+            except Exception:
+                pass
 
         thresh = self._cfg.get("threshold", 5.0)
 

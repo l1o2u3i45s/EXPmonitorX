@@ -304,12 +304,10 @@ def find_exp_bar_rows(strip_bgr):
     """
     找出 EXP 進度條的行範圍（密集黃色區域）。
 
-    strip 結構：
-      - row 0-18  : HP/MP 區域（稀疏黃色，40-90px）→ 排除
-      - row 25-34 : EXP 填充條（密集黃色，800+px）→ 這才是目標
-
-    EXP 文字疊在填充條上，因此要保留密集黃色的行，
-    排除稀疏黃色（HP/MP 數字那排）。
+    取「最底部」的一段連續密集黃色列作為 EXP 條：
+      EXP 進度條永遠在視窗最底邊；上方若有金色活動 UI / 金框背景，
+      也會是密集黃色，但會被底部那段以外的群組排除（兩段間有空白列分隔）。
+    這樣可避免把上方 HP/MP 與圖示一起切進來造成辨識爆掉。
     """
     hsv      = cv2.cvtColor(strip_bgr, cv2.COLOR_BGR2HSV)
     yellow   = cv2.inRange(hsv, EXP_YELLOW_LO, EXP_YELLOW_HI)
@@ -317,18 +315,27 @@ def find_exp_bar_rows(strip_bgr):
     w        = strip_bgr.shape[1]
     h        = strip_bgr.shape[0]
 
-    # 密集黃色 = EXP 填充條（> 10% 寬度）
     fill_thresh = max(20, w * 0.10)
-    fill_rows   = np.where(row_sums >= fill_thresh)[0]
-
-    if len(fill_rows) == 0:
-        # 找不到填充條，退回整條
+    dense       = row_sums >= fill_thresh
+    if not dense.any():
         return 0, h
 
-    # 回傳填充條的行範圍（加小幅 padding 以免字被切到）
-    y0 = max(0, int(fill_rows[0]) - 2)
-    y1 = min(h, int(fill_rows[-1]) + 3)
-    return y0, y1
+    # 把密集列切成數段（容忍 1 列以內的小空隙），取最底部那一段
+    groups = []        # [(y0, y1), ...] 連續密集列，遇到空白列即分段
+    y = 0
+    while y < h:
+        if dense[y]:
+            y0 = y
+            while y < h and dense[y]:
+                y += 1
+            groups.append((y0, y - 1))
+        else:
+            y += 1
+
+    # 取最底部（y1 最大）且高度>=3 的一段；找不到就退回最底部那段
+    cand = [g for g in groups if g[1] - g[0] + 1 >= 3]
+    by0, by1 = max(cand or groups, key=lambda g: g[1])
+    return max(0, by0 - 2), min(h, by1 + 3)
 
 
 # ──────────────────────────────────────────────
@@ -678,7 +685,7 @@ def run_monitor(interval):
 
             best_e, best_p = None, None
             if ocr is not None:
-                r = ocr.recognize_row(exp_row)
+                r = ocr.recognize_row(band)
                 t = tracker.update(r["exp"], r["pct"])
                 if t["exp"] is not None:
                     best_e = f"{t['exp']:,}"

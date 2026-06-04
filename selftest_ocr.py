@@ -28,7 +28,16 @@ KNOWN_GT = {
 }
 
 def main():
-    folder = sys.argv[1] if len(sys.argv) > 1 else "debug_20260603_231813"
+    if len(sys.argv) > 1:
+        folder = sys.argv[1]
+    else:
+        cands = sorted(glob.glob(os.path.join(HERE, "debug_*/")))
+        cands = [c for c in cands if glob.glob(os.path.join(c, "*_raw.png"))]
+        if not cands:
+            print("[錯誤] 找不到任何含 *_raw.png 的 debug_ 資料夾，請先跑 exp_monitor_debug.py")
+            return
+        folder = cands[-1]   # 最新的一個
+        print(f"(未指定資料夾，自動用最新的：{os.path.basename(folder.rstrip('/'))})")
     d = folder if os.path.isabs(folder) else os.path.join(HERE, folder)
     if not os.path.isdir(d):
         print(f"[錯誤] 找不到資料夾：{d}"); return
