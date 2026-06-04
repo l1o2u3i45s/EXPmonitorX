@@ -56,6 +56,28 @@ EXP_YELLOW_LO = np.array([15, 80, 80],  np.uint8)
 EXP_YELLOW_HI = np.array([65, 255, 255], np.uint8)
 UPSCALE = 8
 
+def _imread_u(path, flags=cv2.IMREAD_GRAYSCALE):
+    """可讀含中文/Unicode 路徑的圖（cv2.imread 對非 ASCII 路徑會失敗）。"""
+    try:
+        data = np.fromfile(str(path), dtype=np.uint8)
+        if data.size == 0:
+            return None
+        return cv2.imdecode(data, flags)
+    except Exception:
+        return None
+
+def _imwrite_u(path, img):
+    """可寫含中文/Unicode 路徑的圖。"""
+    try:
+        ext = os.path.splitext(str(path))[1] or '.png'
+        ok, buf = cv2.imencode(ext, img)
+        if not ok:
+            return False
+        buf.tofile(str(path))
+        return True
+    except Exception:
+        return False
+
 ARTIFACT_W   = 14    # 開頭寬度 <= 此值的 run 視為邊界假影，丟棄
 MIN_RUNS     = 10    # 少於這麼多 run 視為辨識失敗
 MIN_CONF     = 0.55  # 單字元 NCC 低於此值視為不可信
@@ -107,7 +129,7 @@ class TemplateOCR:
         for fname, ch in FILE_CHAR.items():
             p = self.template_dir / f"{fname}.png"
             if p.exists():
-                img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+                img = _imread_u(p, cv2.IMREAD_GRAYSCALE)
                 if img is not None:
                     self.templates[ch] = img
 

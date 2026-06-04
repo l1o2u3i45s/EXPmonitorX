@@ -41,7 +41,7 @@ _init_easy          = _mod._init_easy
 set_dpi_awareness   = _mod.set_dpi_awareness
 
 try:
-    from exp_template_ocr import TemplateOCR
+    from exp_template_ocr import TemplateOCR, build_mask, _imwrite_u
     _HAS_TEMPLATE = True
 except Exception:
     _HAS_TEMPLATE = False
@@ -317,21 +317,70 @@ class MonitorWorker(QObject):
 
     @pyqtSlot()
     def start_work(self):
-        self._running  = True
-        self._ocr = None
-        if _HAS_TEMPLATE:
-            o = TemplateOCR()
-            if o.is_ready():
-                self._ocr = o
-        if self._ocr is not None:
+        self._running = True
+        try:
+            self._ocr = None
             self._use_tess = False
-            self.status.emit("OCR=Template(形狀比對) 就緒")
-        else:
-            self._use_tess = _setup_tess()
-            if not self._use_tess:
-                _init_easy()
-            self.status.emit(f"OCR={'Tesseract' if self._use_tess else 'EasyOCR'} 就緒")
+            self.status.emit("初始化辨識器…")
+
+            # 1) 優先：模板形狀比對
+            if _HAS_TEMPLATE:
+                try:
+                    o = TemplateOCR()
+                    if o.is_ready():
+                        self._ocr = o
+                        self.status.emit("OCR=Template(形狀比對) 就緒")
+                    else:
+                        self.status.emit(
+                            f"模板未就緒（只載入到 {len(o.templates)} 個；"
+                            f"路徑 {o.template_dir}）")
+                except Exception as e:
+                    self.error_sig.emit(f"模板辨識器載入失敗：{e!r}")
+            else:
+                self.status.emit("模板模組未載入（_HAS_TEMPLATE=False）")
+
+            # 2) 退回：Tesseract → EasyOCR（兩者都包了 try，缺了也不會無聲當掉）
+            if self._ocr is None:
+                try:
+                    self._use_tess = _setup_tess()
+                except Exception as e:
+                    self.error_sig.emit(f"Tesseract 偵測失敗：{e!r}")
+                    self._use_tess = False
+                if self._use_tess:
+                    self.status.emit("OCR=Tesseract 就緒")
+                else:
+                    try:
+                        _init_easy()
+                        self.status.emit("OCR=EasyOCR 就緒")
+                    except Exception as e:
+                        self.error_sig.emit(
+                            "找不到可用的 OCR 引擎："
+                            "模板未就緒、未安裝 Tesseract、EasyOCR 也不可用"
+                            f"（{e!r}）。請確認 templates 資料夾有打包進來。")
+                        self._fatal_startup("no_ocr_engine")
+                        self._running = False
+                        self.status.emit("已停止：沒有可用的 OCR 引擎")
+                        return
+        except Exception as e:
+            self._fatal_startup(repr(e))
+            self.error_sig.emit(f"啟動失敗：{e!r}")
+            self._running = False
+            return
+
         self._loop()
+
+    def _fatal_startup(self, why):
+        """把啟動失敗的完整 traceback 寫到使用者家目錄，方便回報。"""
+        import traceback, os as _os
+        try:
+            path = _os.path.join(_os.path.expanduser("~"), "EXPMonitor_error.log")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write("=" * 60 + chr(10))
+                f.write(f"start_work fatal: {why}" + chr(10))
+                f.write(traceback.format_exc() + chr(10))
+            self.error_sig.emit(f"（錯誤詳情已寫到 {path}）")
+        except Exception:
+            pass
 
     def stop(self): self._running = False
 
@@ -876,10 +925,16 @@ class MainWindow(QMainWindow):
         btn_clear_chart.setFixedHeight(38)
         btn_clear_chart.clicked.connect(self._clear_charts)
 
+        btn_diag = QPushButton("🔍 診斷擷取")
+        btn_diag.setFixedHeight(38)
+        btn_diag.setToolTip("擷取目前畫面與辨識結果，存到使用者資料夾供回報")
+        btn_diag.clicked.connect(self._debug_capture)
+
         ctrl_row.addWidget(self._btn_start)
         ctrl_row.addWidget(self._btn_stop)
         ctrl_row.addWidget(btn_clear_log)
         ctrl_row.addWidget(btn_clear_chart)
+        ctrl_row.addWidget(btn_diag)
         ctrl_row.addStretch()
         self._body_lay.addLayout(ctrl_row)
 
@@ -914,6 +969,93 @@ class MainWindow(QMainWindow):
         self._chart_eps_widget.setVisible(self._vis.get("chart_eps", True))
         self._log_widget.setVisible(self._vis.get("log", True))
         self.resize(sz)
+
+    # ── 診斷擷取（給用 exe、沒有 Python 的人回報問題用）──────────────────────────
+    def _debug_capture(self):
+        import json, datetime, traceback
+        if not _HAS_TEMPLATE:
+            self._log_err("模板模組未載入，無法診斷擷取"); return
+        try:
+            out = os.path.join(os.path.expanduser("~"), "EXPMonitor_debug")
+            os.makedirs(out, exist_ok=True)
+            hwnd, reg = find_window()
+            if hwnd is None:
+                self._log_warn("診斷擷取：找不到 MapleStory 視窗"); return
+            img, cap = capture_strip(hwnd, reg)
+            if img is None:
+                self._log_err(f"診斷擷取：截圖失敗（{cap}）"); return
+            ts = datetime.datetime.now().strftime("%H%M%S")
+            _imwrite_u(os.path.join(out, f"{ts}_raw.png"), img)
+            # 另存一張「未過濾的 mss 直擷底部條」，用來校準低 EXP% 定位
+            mss_stats = {}
+            try:
+                import numpy as _np, cv2 as _cv2
+                mss_img, _ = _mod._cap_mss(reg)
+                if mss_img is not None:
+                    _imwrite_u(os.path.join(out, f"{ts}_mss.png"), mss_img)
+                    _hsv = _cv2.cvtColor(mss_img, _cv2.COLOR_BGR2HSV)
+                    _yel = _cv2.inRange(_hsv, _mod.EXP_YELLOW_LO, _mod.EXP_YELLOW_HI)
+                    mss_stats = {"mss_max": int(mss_img.max()),
+                                 "mss_yellow_px": int((_yel > 0).sum())}
+            except Exception as _e:
+                mss_stats = {"mss_error": repr(_e)}
+            y0, y1 = find_exp_bar_rows(img)
+            band = img[y0:y1, :]
+            _imwrite_u(os.path.join(out, f"{ts}_band.png"), band)
+            ocr = (self._worker._ocr if (self._worker and getattr(self._worker, "_ocr", None))
+                   else TemplateOCR())
+            mask = build_mask(band)
+            _imwrite_u(os.path.join(out, f"{ts}_mask.png"), mask)
+            try:
+                _imwrite_u(os.path.join(out, f"{ts}_block.png"), ocr._isolate_text(mask))
+            except Exception:
+                pass
+            r = ocr.recognize(mask, debug=True)
+            # 額外幾何資訊（判斷 DPI/座標是否錯位）
+            geo = {}
+            try:
+                import win32gui as _wg
+                wl, wt, wr, wb = _wg.GetWindowRect(hwnd)
+                cr = _wg.GetClientRect(hwnd)
+                cs = _wg.ClientToScreen(hwnd, (0, 0))
+                geo = {"win_rect": [wl, wt, wr, wb],
+                       "win_rect_wh": [wr - wl, wb - wt],
+                       "client_wh": [cr[2] - cr[0], cr[3] - cr[1]],
+                       "client_origin": [cs[0], cs[1]]}
+            except Exception as _e:
+                geo = {"geo_err": repr(_e)}
+            try:
+                import ctypes as _ct
+                aw = _ct.c_int(0)
+                _ct.windll.shcore.GetProcessDpiAwareness(0, _ct.byref(aw))
+                geo["dpi_awareness"] = aw.value   # 0=unaware 1=system 2=permonitor
+            except Exception:
+                pass
+            info = {
+                "window": f"{reg['width']}x{reg['height']}",
+                "geo": geo,
+                "cap_method": cap,
+                "strip_shape": list(img.shape),
+                "exp_rows": f"{y0}-{y1}",
+                "exp": r.get("exp"), "pct": r.get("pct"),
+                "conf": round(r.get("conf", 0), 3), "reason": r.get("reason"),
+                "n_runs": r.get("n_runs"), "widths": r.get("widths"),
+                "templates_ready": ocr.is_ready(),
+                "template_dir": str(ocr.template_dir),
+                "mss": mss_stats,
+            }
+            with open(os.path.join(out, f"{ts}_info.txt"), "w", encoding="utf-8") as f:
+                f.write(json.dumps(info, ensure_ascii=False, indent=2))
+            self._log_info(
+                f"診斷擷取完成 → {out}（exp={r.get('exp')} pct={r.get('pct')} "
+                f"reason={r.get('reason')}）。請把整個資料夾傳回報。")
+            try:
+                os.startfile(out)   # 自動開啟資料夾（Windows）
+            except Exception:
+                pass
+        except Exception as e:
+            self._log_err(f"診斷擷取失敗：{e!r}")
+            self._log_err(traceback.format_exc())
 
     # ── 偷懶偵測 ────────────────────────────────────────────────────────────────
     def _slack_normal_style(self):
@@ -1034,6 +1176,8 @@ class MainWindow(QMainWindow):
         self._worker.ocr_fail.connect(lambda ts: self._log_warn(f"[{ts}] OCR 無結果"))
         self._worker.status.connect(self._log_info)
         self._worker.error_sig.connect(self._log_err)
+        self._worker.error_sig.connect(
+            lambda m: self._set_status("⚠ 錯誤（見下方紀錄）", C["red"]))
         self._thread.start()
 
         self._btn_start.setEnabled(False)
@@ -1295,6 +1439,18 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
+    # ── DPI 感知必須在 QApplication 之前設定 ──────────────────────────────
+    # 否則 GetClientRect/ClientToScreen 會回傳「邏輯像素」(被縮放虛擬化)，
+    # 與 mss 抓的「物理像素」對不上 → 算出的視窗底部偏高 → EXP 條被切掉。
+    try:
+        set_dpi_awareness()
+    except Exception:
+        pass
+    try:
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    except Exception:
+        pass
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     win = MainWindow()

@@ -16,7 +16,7 @@ import cv2, numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 _spec = importlib.util.spec_from_file_location("expmon", os.path.join(HERE, "exp_monitor.py"))
 M = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(M)
-from exp_template_ocr import TemplateOCR, ExpTracker
+from exp_template_ocr import TemplateOCR, ExpTracker, _imread_u
 
 # 已驗證的正解（debug_20260603_231813，由人工逐張核對）
 KNOWN_GT = {
@@ -57,7 +57,7 @@ def main():
     n=read=mono=gtok=gttot=0; prev=None
     for f in frames:
         fid = os.path.basename(f)[:5]
-        img = cv2.imread(f)
+        img = _imread_u(f, cv2.IMREAD_COLOR)
         y0,y1 = M.find_exp_bar_rows(img); band = img[y0:y1,:]
         x0,x1 = M.find_exp_text_cols(band, img.shape[1]); row = band[:,x0:x1]
         r = ocr.recognize_row(row); t = tracker.update(r["exp"], r["pct"])

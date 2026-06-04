@@ -49,7 +49,8 @@ except Exception:
 # 設定
 # ──────────────────────────────────────────────
 MONITOR_INTERVAL = 5
-EXP_BAR_HEIGHT   = 35      # 底部擷取高度（px）
+EXP_BAR_HEIGHT   = 140     # 底部擷取高度（px）；截高一點，讓 EXP 條無論落在底部哪個位置都包得到，
+                           # 真正的 EXP 文字行由 find_exp_bar_rows 在這條裡面定位。
 DEBUG_DIR        = "debug_images"
 
 # EXP 進度條黃色範圍（HSV）
@@ -150,15 +151,19 @@ def _cap_printwindow(hwnd, reg):
     """
     try:
         import win32gui, win32ui
+        # 用「整個視窗」大小渲染，再依 client 偏移正確裁切底部，
+        # 否則 GetWindowDC 含標題列/邊框會讓「底部 35px」偏高、切掉 EXP 條。
+        wl, wt, wr, wb = win32gui.GetWindowRect(hwnd)
+        win_w, win_h = max(1, wr - wl), max(1, wb - wt)
+        cx, cy = win32gui.ClientToScreen(hwnd, (0, 0))
+        off_x, off_y = cx - wl, cy - wt
         cw, ch = reg['width'], reg['height']
         hdc  = win32gui.GetWindowDC(hwnd)
         mdc  = win32ui.CreateDCFromHandle(hdc)
         sdc  = mdc.CreateCompatibleDC()
         bmp  = win32ui.CreateBitmap()
-        bmp.CreateCompatibleBitmap(mdc, cw, ch)
+        bmp.CreateCompatibleBitmap(mdc, win_w, win_h)
         sdc.SelectObject(bmp)
-        # PW_RENDERFULLCONTENT=2：要求視窗完整渲染（不受遮擋影響）
-        # 回傳 0 對 DX 遊戲很常見，不代表失敗，直接看圖片內容
         ctypes.windll.user32.PrintWindow(hwnd, sdc.GetSafeHdc(), 2)
         info = bmp.GetInfo()
         data = bmp.GetBitmapBits(True)
@@ -167,7 +172,12 @@ def _cap_printwindow(hwnd, reg):
         sdc.DeleteDC(); mdc.DeleteDC()
         win32gui.ReleaseDC(hwnd, hdc)
         full = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-        return full[ch-EXP_BAR_HEIGHT:, :], "PrintWindow"
+        y0 = off_y + ch - EXP_BAR_HEIGHT
+        y1 = off_y + ch
+        crop = full[y0:y1, off_x:off_x + cw]
+        if crop.shape[0] != EXP_BAR_HEIGHT or crop.shape[1] != cw:
+            crop = full[max(0, full.shape[0] - EXP_BAR_HEIGHT):, :]   # 保底
+        return crop, "PrintWindow"
     except Exception as e:
         return None, f"PrintWindow:{e}"
 
@@ -197,16 +207,26 @@ def _cap_bitblt(reg):
         return None, f"BitBlt:{e}"
 
 
-def _has_exp_yellow(img_bgr):
+def _has_exp_content(img_bgr):
     """
-    驗證截圖是否包含 EXP 進度條的黃色像素。
-    用來過濾「截到其他視窗」的錯誤結果。
+    驗證截圖是否真的截到 EXP 條（而非全黑/截到別的視窗）。
+    高 EXP%：用黃色填充判斷；低 EXP%（剛升級、黃色幾乎沒有）：改用白色數字文字判斷。
     """
     if img_bgr is None or np.max(img_bgr) < 10:
         return False
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
     yellow = cv2.inRange(hsv, EXP_YELLOW_LO, EXP_YELLOW_HI)
-    return int(np.sum(yellow > 0)) >= EXP_ROW_MIN_YELLOW_PX
+    if int(np.sum(yellow > 0)) >= EXP_ROW_MIN_YELLOW_PX:
+        return True
+    # 低 EXP%：黃色不足 → 看有沒有一串白色數字（亮且低飽和）
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    sat  = hsv[:, :, 1]
+    white = (gray > 180) & (sat < 80)
+    return int(np.sum(white)) >= 100
+
+
+# 舊名相容
+_has_exp_yellow = _has_exp_content
 
 
 def capture_strip(hwnd, reg):
@@ -224,10 +244,9 @@ def capture_strip(hwnd, reg):
     except Exception:
         is_focused = True   # 無法判斷時預設 mss 優先
 
-    if is_focused:
-        order = [(_cap_mss,(reg,)), (_cap_printwindow,(hwnd,reg)), (_cap_bitblt,(reg,))]
-    else:
-        order = [(_cap_printwindow,(hwnd,reg)), (_cap_mss,(reg,)), (_cap_bitblt,(reg,))]
+    # mss 在視窗「可見」時（不論是否在前景）幾何最準；只有被其他視窗蓋住時才會抓錯，
+    # 那種情況才退到 PrintWindow（已修正偏移）。
+    order = [(_cap_mss,(reg,)), (_cap_printwindow,(hwnd,reg)), (_cap_bitblt,(reg,))]
 
     last_err = "所有截圖方法失敗"
     for fn, args in order:
@@ -318,7 +337,8 @@ def find_exp_bar_rows(strip_bgr):
     fill_thresh = max(20, w * 0.10)
     dense       = row_sums >= fill_thresh
     if not dense.any():
-        return 0, h
+        wt = _rows_by_white_text(strip_bgr)   # 低 EXP%：改用白色文字定位
+        return wt if wt is not None else (0, h)
 
     # 把密集列切成數段（容忍 1 列以內的小空隙），取最底部那一段
     groups = []        # [(y0, y1), ...] 連續密集列，遇到空白列即分段
@@ -335,6 +355,38 @@ def find_exp_bar_rows(strip_bgr):
     # 取最底部（y1 最大）且高度>=3 的一段；找不到就退回最底部那段
     cand = [g for g in groups if g[1] - g[0] + 1 >= 3]
     by0, by1 = max(cand or groups, key=lambda g: g[1])
+    y_band = (max(0, by0 - 2), min(h, by1 + 3))
+    # EXP 文字一定在最底：若白字帶明顯比黃色帶更靠底（黃色多半被背景暖色騙到上面），
+    # 改用白字帶（低 EXP% 必經此路）。
+    wt = _rows_by_white_text(strip_bgr)
+    if wt is not None and wt[1] > y_band[1] + 4:
+        return wt
+    return y_band
+
+
+def _rows_by_white_text(strip_bgr):
+    """以白色數字文字定位 EXP 文字行：取「最底部、被空隙隔開」的一段白字列。
+    對任何 EXP%（含 0%）皆有效，且不受背景（石地等暖色被誤認黃色）影響。"""
+    hsv  = cv2.cvtColor(strip_bgr, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(strip_bgr, cv2.COLOR_BGR2GRAY)
+    sat  = hsv[:, :, 1]
+    w, h = strip_bgr.shape[1], strip_bgr.shape[0]
+    white = (gray > 180) & (sat < 90)
+    row_w = np.sum(white, axis=1)
+    on = row_w >= max(10, w * 0.005)
+    if not on.any():
+        return None
+    groups = []
+    y = 0
+    while y < h:
+        if on[y]:
+            y0 = y
+            while y < h and on[y]:
+                y += 1
+            groups.append((y0, y - 1))
+        else:
+            y += 1
+    by0, by1 = max(groups, key=lambda g: g[1])   # 最底部那組
     return max(0, by0 - 2), min(h, by1 + 3)
 
 

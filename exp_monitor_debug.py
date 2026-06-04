@@ -23,7 +23,7 @@ import cv2, numpy as np
 HERE = Path(__file__).parent
 _spec = importlib.util.spec_from_file_location("expmon", HERE / "exp_monitor.py")
 M = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(M)
-from exp_template_ocr import TemplateOCR, ExpTracker, build_mask
+from exp_template_ocr import TemplateOCR, ExpTracker, build_mask, _imwrite_u
 
 ap = argparse.ArgumentParser()
 ap.add_argument("-i", "--interval", type=float, default=1.0)
@@ -77,13 +77,13 @@ with open(out_dir / "session.csv", "w", newline="", encoding="utf-8-sig") as f:
                 if args.frames and frame>=args.frames: break
                 time.sleep(args.interval); continue
 
-            cv2.imwrite(str(out_dir/f"{frame:05d}_raw.png"), img)
+            _imwrite_u(str(out_dir/f"{frame:05d}_raw.png"), img)
             y0,y1 = M.find_exp_bar_rows(img); band = img[y0:y1,:]
             x0,x1 = M.find_exp_text_cols(band, img.shape[1]); row = band[:,x0:x1]
             mask = build_mask(band)   # 用整條 band，由 recognize 內部切文字區塊（抗金色UI雜訊）
-            cv2.imwrite(str(out_dir/f"{frame:05d}_mask.png"), mask)
+            _imwrite_u(str(out_dir/f"{frame:05d}_mask.png"), mask)
             try:
-                cv2.imwrite(str(out_dir/f"{frame:05d}_block.png"), ocr._isolate_text(mask))
+                _imwrite_u(str(out_dir/f"{frame:05d}_block.png"), ocr._isolate_text(mask))
             except Exception:
                 pass
 
