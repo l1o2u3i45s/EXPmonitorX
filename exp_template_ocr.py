@@ -42,12 +42,20 @@ else:
     _BASE = Path(__file__).resolve().parent
 TEMPLATE_DIR = _BASE / "templates"
 
+# 使用者校準後的模板存這裡（可寫入；開機優先載入）
+try:
+    _APP = Path(os.environ.get("APPDATA") or os.path.expanduser("~"))
+except Exception:
+    _APP = Path(os.path.expanduser("~"))
+USER_TEMPLATE_DIR = _APP / "EXPMonitor" / "templates"
+
 FILE_CHAR = {
     '0': '0', '1': '1', '2': '2', '3': '3', '4': '4',
     '5': '5', '6': '6', '7': '7', '8': '8', '9': '9',
     'comma': ',', 'dot': '.', 'lbracket': '[', 'rbracket': ']', 'pct': '%',
 }
 
+_CHAR_TO_FILE = {v: k for k, v in FILE_CHAR.items()}
 DIGITS = list("0123456789")
 ALL_CHARS = list("0123456789,.[]%")
 
@@ -100,18 +108,16 @@ def _upscale(mask: np.ndarray) -> np.ndarray:
 
 def build_mask(exp_row_bgr: np.ndarray) -> np.ndarray:
     """
-    從裁切好的 EXP 文字行（BGR）產生乾淨白字黑底遮罩。
-    黃色填充區：文字暗 → 反轉成白；暗區：文字白 → 保留。
-    不做邊界清除帶（那會吃掉落在邊界上的開頭數字）。
+    白字遮罩：只抓白色數字本體（高亮度 + 低飽和）。
+    白字在「暗底」「黃色填充」「活動金框」「石地背景」上都成立，
+    而黃條/暖色背景是高飽和 → 被排除。對任何 EXP 填充% 都乾淨、通用。
+    （取代舊的 YellowAware 反轉：那在高填充時會把整條黃條反轉成雜訊。）
     """
     hsv  = cv2.cvtColor(exp_row_bgr, cv2.COLOR_BGR2HSV)
     gray = cv2.cvtColor(exp_row_bgr, cv2.COLOR_BGR2GRAY)
-    ymask = cv2.inRange(hsv, EXP_YELLOW_LO, EXP_YELLOW_HI)
-    gi = gray.astype(np.int16)
-    norm = np.where(ymask > 0, 255 - gi, gi)
-    norm = np.clip(norm, 0, 255).astype(np.uint8)
-    _, ya = cv2.threshold(norm, 160, 255, cv2.THRESH_BINARY)
-    return _upscale(ya)
+    sat  = hsv[:, :, 1]
+    white = ((gray > 170) & (sat < 80)).astype(np.uint8) * 255
+    return _upscale(white)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -119,8 +125,14 @@ def build_mask(exp_row_bgr: np.ndarray) -> np.ndarray:
 # ══════════════════════════════════════════════════════════════════════════════
 class TemplateOCR:
 
-    def __init__(self, template_dir: Path | str = TEMPLATE_DIR):
-        self.template_dir = Path(template_dir)
+    def __init__(self, template_dir: Path | str | None = None):
+        # 優先用使用者校準模板；沒有才用內建
+        if template_dir is not None:
+            self.template_dir = Path(template_dir)
+        elif _user_templates_ready():
+            self.template_dir = USER_TEMPLATE_DIR
+        else:
+            self.template_dir = TEMPLATE_DIR
         self.templates: dict[str, np.ndarray] = {}
         self._load()
 
@@ -455,6 +467,79 @@ class ExpTracker:
             self.deltas.append(delta)
             if len(self.deltas) > self.window:
                 self.deltas.pop(0)
+
+
+def _user_templates_ready() -> bool:
+    try:
+        n = sum(1 for c in "0123456789"
+                if (USER_TEMPLATE_DIR / f"{c}.png").exists())
+        return n >= 10
+    except Exception:
+        return False
+
+
+def group_commas(digits: str) -> str:
+    """1234567 -> 1,234,567"""
+    digits = "".join(ch for ch in digits if ch.isdigit())
+    if not digits:
+        return ""
+    out = []
+    for i, ch in enumerate(reversed(digits)):
+        if i and i % 3 == 0:
+            out.append(",")
+        out.append(ch)
+    return "".join(reversed(out))
+
+
+def build_user_templates(band_bgr, exp_digits: str, pct_str: str,
+                         out_dir: Path | str = USER_TEMPLATE_DIR) -> tuple:
+    """
+    用一張校準畫面（含使用者輸入的正確值）建立「該客戶端字形」的模板。
+    回傳 (ok, msg)。
+    """
+    exp_digits = "".join(ch for ch in exp_digits if ch.isdigit())
+    pct_str = pct_str.strip().replace("%", "")
+    if not exp_digits or "." not in pct_str:
+        return False, "請輸入 EXP 數字與 百分比（例如 86.311）"
+    glyphs = group_commas(exp_digits) + "[" + pct_str + "%]"
+
+    ocr = TemplateOCR.__new__(TemplateOCR)   # 不觸發載入
+    mask = build_mask(band_bgr)
+    mask = TemplateOCR._isolate_text(mask)
+    cs = np.sum(mask > 0, axis=0)
+    on = np.where(cs > 0)[0]
+    if len(on) == 0:
+        return False, "校準畫面找不到文字（白字遮罩為空）"
+    mask = mask[:, max(0, on[0] - 4):on[-1] + 5]
+    runs = TemplateOCR._runs(mask)
+    if len(runs) != len(glyphs):
+        return (False,
+                f"分割數({len(runs)})與輸入字數({len(glyphs)})不符，"
+                f"請確認輸入＝畫面所見（{glyphs}），或換一張更清楚的畫面再校準")
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    samples: dict[str, list] = {}
+    for (x0, x1), ch in zip(runs, glyphs):
+        if ch in _CHAR_TO_FILE:
+            seg = TemplateOCR._crop(mask[:, x0:x1 + 1])
+            samples.setdefault(ch, []).append(seg)
+
+    built = 0
+    for ch, segs in samples.items():
+        H = int(np.median([s.shape[0] for s in segs]))
+        W = int(np.median([s.shape[1] for s in segs]))
+        rez = [cv2.resize(s, (W, H), interpolation=cv2.INTER_AREA) for s in segs]
+        tmpl = np.mean(rez, axis=0).astype(np.uint8)
+        _imwrite_u(out_dir / f"{_CHAR_TO_FILE[ch]}.png", tmpl)
+        built += 1
+    have = [c for c in "0123456789" if (out_dir / f"{c}.png").exists()]
+    miss = [c for c in "0123456789" if c not in have]
+    if miss:
+        return (True,
+                f"已累積數字模板 {len(have)}/10（本張新增 {built} 個字元）。"
+                f"還缺：{','.join(miss)} → 請再對「含這些數字」的畫面校準補齊。")
+    return True, f"校準完成！10/10 數字模板齊全，已存到 {out_dir}"
 
 
 if __name__ == "__main__":

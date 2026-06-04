@@ -10,14 +10,15 @@ from collections import deque
 from datetime import datetime
 
 import numpy as np
+import cv2
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QDoubleSpinBox, QTextEdit,
     QButtonGroup, QRadioButton, QLineEdit, QFrame,
-    QCheckBox, QScrollArea, QProgressBar, QSizePolicy, QSpinBox, QMessageBox, QFileDialog,
+    QCheckBox, QScrollArea, QProgressBar, QSizePolicy, QSpinBox, QMessageBox, QFileDialog, QDialog, QDialogButtonBox,
 )
 from PyQt5.QtCore import Qt, QThread, QObject, pyqtSignal, pyqtSlot, QTimer
-from PyQt5.QtGui import QColor, QTextCursor, QFont
+from PyQt5.QtGui import QColor, QTextCursor, QFont, QImage, QPixmap
 import pyqtgraph as pg
 
 # ── Core module ──────────────────────────────────────────────────────────────
@@ -41,7 +42,8 @@ _init_easy          = _mod._init_easy
 set_dpi_awareness   = _mod.set_dpi_awareness
 
 try:
-    from exp_template_ocr import TemplateOCR, build_mask, _imwrite_u
+    from exp_template_ocr import (TemplateOCR, build_mask, _imwrite_u,
+                                  build_user_templates, USER_TEMPLATE_DIR)
     _HAS_TEMPLATE = True
 except Exception:
     _HAS_TEMPLATE = False
@@ -930,11 +932,17 @@ class MainWindow(QMainWindow):
         btn_diag.setToolTip("擷取目前畫面與辨識結果，存到使用者資料夾供回報")
         btn_diag.clicked.connect(self._debug_capture)
 
+        btn_calib = QPushButton("🎯 校準辨識")
+        btn_calib.setFixedHeight(38)
+        btn_calib.setToolTip("一次性校準：用你自己遊戲畫面建立辨識模板（換客戶端/字體時用）")
+        btn_calib.clicked.connect(self._calibrate)
+
         ctrl_row.addWidget(self._btn_start)
         ctrl_row.addWidget(self._btn_stop)
         ctrl_row.addWidget(btn_clear_log)
         ctrl_row.addWidget(btn_clear_chart)
         ctrl_row.addWidget(btn_diag)
+        ctrl_row.addWidget(btn_calib)
         ctrl_row.addStretch()
         self._body_lay.addLayout(ctrl_row)
 
@@ -1056,6 +1064,70 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._log_err(f"診斷擷取失敗：{e!r}")
             self._log_err(traceback.format_exc())
+
+    def _calibrate(self):
+        """一次性校準：抓現在的經驗列，請使用者輸入畫面上看到的數字，建立該客戶端字形的模板。"""
+        if not _HAS_TEMPLATE:
+            QMessageBox.warning(self, "校準", "辨識模組未載入，無法校準。"); return
+        hwnd, reg = find_window()
+        if hwnd is None:
+            QMessageBox.warning(self, "校準", "找不到 MapleStory 視窗，請先開遊戲。"); return
+        img, cap = capture_strip(hwnd, reg)
+        if img is None:
+            QMessageBox.warning(self, "校準", f"截圖失敗（{cap}）。"); return
+        y0, y1 = find_exp_bar_rows(img)
+        band = img[y0:y1, :]
+        # 裁切到文字區塊讓預覽看得清楚
+        try:
+            mk = build_mask(band)
+            cc = (mk > 0).sum(axis=0)
+            import numpy as _np
+            on = _np.where(cc > 16)[0]
+            if len(on):
+                bx0 = int(on[0] / 8) - 12
+                bx1 = int(on[-1] / 8) + 12
+                prev = band[:, max(0, bx0):min(band.shape[1], bx1)]
+            else:
+                prev = band
+        except Exception:
+            prev = band
+
+        dlg = QDialog(self); dlg.setWindowTitle("校準辨識（一次性）")
+        dlg.setMaximumWidth(860)
+        v = QVBoxLayout(dlg)
+        v.addWidget(_lbl("下圖是目前擷取到的『經驗列』。請照畫面上看到的、輸入 EXP 數字與百分比：", C["white"], 12))
+        rgb = cv2.cvtColor(prev, cv2.COLOR_BGR2RGB)
+        hh, ww = rgb.shape[:2]
+        qimg = QImage(rgb.tobytes(), ww, hh, 3 * ww, QImage.Format_RGB888)
+        pix = QPixmap.fromImage(qimg)
+        # 經驗列又寬又矮：寬度上限 800，高度拉到約 56px 方便辨識（不保持比例沒關係，預覽用）
+        disp_w = min(800, ww)
+        lblimg = QLabel()
+        lblimg.setPixmap(pix.scaled(disp_w, 56))
+        lblimg.setStyleSheet("background:#000;")
+        v.addWidget(lblimg)
+        exp_in = QLineEdit(); exp_in.setPlaceholderText("EXP 數字（不含逗號），例：35140164989579")
+        pct_in = QLineEdit(); pct_in.setPlaceholderText("百分比，例：86.311")
+        v.addWidget(_lbl("EXP 數字（不含逗號）", C["gray"], 11)); v.addWidget(exp_in)
+        v.addWidget(_lbl("百分比", C["gray"], 11)); v.addWidget(pct_in)
+        v.addWidget(_lbl("提示：一個數字通常涵蓋不到 0~9 全部，依提示對「含缺少數字」的畫面多校準幾張即可。", C["gray"], 10))
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        try:
+            ok, msg = build_user_templates(band, exp_in.text(), pct_in.text())
+        except Exception as e:
+            QMessageBox.critical(self, "校準失敗", repr(e)); return
+        (QMessageBox.information if ok else QMessageBox.warning)(self, "校準結果", msg)
+        self._log_info("校準：" + msg)
+        # 立即套用：重載辨識器，讓 worker 下一幀就用新模板
+        try:
+            if self._worker is not None and getattr(self._worker, "_ocr", None) is not None:
+                self._worker._ocr = TemplateOCR()   # 會優先載入使用者模板
+        except Exception:
+            pass
 
     # ── 偷懶偵測 ────────────────────────────────────────────────────────────────
     def _slack_normal_style(self):

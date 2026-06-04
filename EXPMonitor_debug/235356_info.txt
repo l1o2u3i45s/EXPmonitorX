@@ -1,0 +1,66 @@
+{
+  "window": "1920x1080",
+  "geo": {
+    "win_rect": [
+      266,
+      168,
+      2204,
+      1295
+    ],
+    "win_rect_wh": [
+      1938,
+      1127
+    ],
+    "client_wh": [
+      1920,
+      1080
+    ],
+    "client_origin": [
+      275,
+      206
+    ],
+    "dpi_awareness": 2
+  },
+  "cap_method": "mss",
+  "strip_shape": [
+    140,
+    1920,
+    3
+  ],
+  "exp_rows": "124-140",
+  "exp": "3514166943656",
+  "pct": null,
+  "conf": 0.287,
+  "reason": "pct_fail",
+  "n_runs": 22,
+  "widths": [
+    81,
+    105,
+    42,
+    185,
+    49,
+    74,
+    98,
+    73,
+    10,
+    73,
+    98,
+    152,
+    9,
+    65,
+    33,
+    162,
+    16,
+    114,
+    10,
+    24,
+    104,
+    33
+  ],
+  "templates_ready": true,
+  "template_dir": "D:\\EXPMonitor\\EXPMonitor\\_internal\\templates",
+  "mss": {
+    "mss_max": 255,
+    "mss_yellow_px": 32621
+  }
+}
