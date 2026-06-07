@@ -42,10 +42,13 @@ _init_easy          = _mod._init_easy
 set_dpi_awareness   = _mod.set_dpi_awareness
 
 # 設定存檔位置（可寫入）
-try:
-    _CFG_DIR = os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~'), 'EXPMonitor')
-except Exception:
-    _CFG_DIR = os.path.expanduser('~')
+def _app_dir():
+    """程式所在資料夾：打包後＝exe 旁邊；原始碼＝本檔資料夾。"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+_CFG_DIR = _app_dir()
 CONFIG_PATH = os.path.join(_CFG_DIR, 'config.json')
 
 try:
@@ -380,7 +383,7 @@ class MonitorWorker(QObject):
         """把啟動失敗的完整 traceback 寫到使用者家目錄，方便回報。"""
         import traceback, os as _os
         try:
-            path = _os.path.join(_os.path.expanduser("~"), "EXPMonitor_error.log")
+            path = _os.path.join(_CFG_DIR, "EXPMonitor_error.log")
             with open(path, "a", encoding="utf-8") as f:
                 f.write("=" * 60 + chr(10))
                 f.write(f"start_work fatal: {why}" + chr(10))
@@ -725,7 +728,7 @@ class MainWindow(QMainWindow):
         self._sess_start_ts = None
         self._sess_start_pct = None
         self._sess_prev_pct = None
-        self._sess_gain = 0.0
+        self._sess_levels = 0
 
         pg.setConfigOptions(antialias=True)
         self._build_ui()
@@ -1047,7 +1050,7 @@ class MainWindow(QMainWindow):
         if not _HAS_TEMPLATE:
             self._log_err("模板模組未載入，無法診斷擷取"); return
         try:
-            out = os.path.join(os.path.expanduser("~"), "EXPMonitor_debug")
+            out = os.path.join(_CFG_DIR, "EXPMonitor_debug")
             os.makedirs(out, exist_ok=True)
             hwnd, reg = find_window()
             if hwnd is None:
@@ -1325,7 +1328,7 @@ class MainWindow(QMainWindow):
         self._sess_start_ts   = time.time()
         self._sess_start_pct  = None
         self._sess_prev_pct   = None
-        self._sess_gain       = 0.0
+        self._sess_levels     = 0
         self._sess_start_lbl.setText("起始 —")
         self._sess_dur_lbl.setText("持續 00:00:00")
         self._sess_gain_lbl.setText("增加 +0.000%")
@@ -1563,18 +1566,26 @@ class MainWindow(QMainWindow):
         self._rate.clear_chart_data()
 
     def _update_session(self, pct_f):
+        # 起始
         if self._sess_start_pct is None:
             self._sess_start_pct = pct_f
             self._sess_prev_pct = pct_f
+            self._sess_levels = 0
             self._sess_start_lbl.setText(f"起始 {pct_f:.3f}%")
-        else:
-            d = pct_f - self._sess_prev_pct
-            if d < -50:           # 升等：% 由高掉到低
-                d += 100.0
-            if d > 0:
-                self._sess_gain += d
-            self._sess_prev_pct = pct_f
-            self._sess_gain_lbl.setText(f"增加 +{self._sess_gain:.3f}%")
+            self._sess_gain_lbl.setText("增加 +0.000%")
+            return
+        prev = self._sess_prev_pct
+        if prev > 90.0 and pct_f < 10.0:
+            # 真升等（% 由接近滿掉到接近 0）
+            self._sess_levels += 1
+        elif abs(pct_f - prev) > 10.0:
+            # 不合理的單幀跳動 → 視為 OCR 誤判，忽略（不更新基準、不刷新）
+            return
+        self._sess_prev_pct = pct_f
+        gain = self._sess_levels * 100.0 + (pct_f - self._sess_start_pct)
+        if gain < 0:
+            gain = 0.0
+        self._sess_gain_lbl.setText(f"增加 +{gain:.3f}%")
 
     def _refresh_chart(self):
         if self._sess_start_ts is not None and self._btn_stop.isEnabled():

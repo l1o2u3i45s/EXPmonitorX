@@ -43,11 +43,14 @@ else:
 TEMPLATE_DIR = _BASE / "templates"
 
 # 使用者校準後的模板存這裡（可寫入；開機優先載入）
-try:
-    _APP = Path(os.environ.get("APPDATA") or os.path.expanduser("~"))
-except Exception:
-    _APP = Path(os.path.expanduser("~"))
-USER_TEMPLATE_DIR = _APP / "EXPMonitor" / "templates"
+def _app_base() -> Path:
+    """程式所在資料夾：打包後＝exe 旁邊；原始碼＝本檔資料夾。"""
+    if getattr(sys, "frozen", False):
+        return Path(os.path.dirname(sys.executable))
+    return Path(__file__).resolve().parent
+
+# 使用者校準模板存這裡（與程式同資料夾，開機優先載入）
+USER_TEMPLATE_DIR = _app_base() / "templates_user"
 
 FILE_CHAR = {
     '0': '0', '1': '1', '2': '2', '3': '3', '4': '4',
