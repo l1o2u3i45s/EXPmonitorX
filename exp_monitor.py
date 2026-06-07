@@ -387,6 +387,15 @@ def _rows_by_white_text(strip_bgr):
         else:
             y += 1
     by0, by1 = max(groups, key=lambda g: g[1])   # 最底部那組
+    # 往上沿「仍有白」的列把字元頂端補回來（避免切掉上半），
+    # 但最多只補與該組等高的距離，遇到空隙就停，避免吃到上方 HUD。
+    lo = max(3, int(w * 0.002))
+    gh = by1 - by0 + 1
+    limit = by0 - gh
+    while by0 - 1 >= 0 and by0 - 1 >= limit and row_w[by0 - 1] >= lo:
+        by0 -= 1
+    while by1 + 1 < h and row_w[by1 + 1] >= lo:
+        by1 += 1
     return max(0, by0 - 2), min(h, by1 + 3)
 
 

@@ -5,7 +5,7 @@ pip install PyQt5 pyqtgraph numpy
 python exp_monitor_qt.py
 """
 
-import os, sys, time, subprocess
+import os, sys, time, subprocess, json
 from collections import deque
 from datetime import datetime
 
@@ -40,6 +40,13 @@ parse               = _mod.parse
 _setup_tess         = _mod._setup_tess
 _init_easy          = _mod._init_easy
 set_dpi_awareness   = _mod.set_dpi_awareness
+
+# 設定存檔位置（可寫入）
+try:
+    _CFG_DIR = os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~'), 'EXPMonitor')
+except Exception:
+    _CFG_DIR = os.path.expanduser('~')
+CONFIG_PATH = os.path.join(_CFG_DIR, 'config.json')
 
 try:
     from exp_template_ocr import (TemplateOCR, build_mask, _imwrite_u,
@@ -278,8 +285,7 @@ class RateTracker:
     def chart_data(self, max_pts: int = 28800) -> tuple[list, list]:
         pts = list(self._all)[-max_pts:]
         if len(pts) < 2: return [], []
-        t0 = pts[0][0]
-        return ([(t - t0) / 60 for t, _, _ in pts],
+        return ([t for t, _, _ in pts],
                 [p for _, _, p in pts])
 
     def add_eps_sample(self, eps: float):
@@ -290,8 +296,7 @@ class RateTracker:
         """EXP/s 歷史（以分鐘為 X 軸）。"""
         pts = list(self._eps_samples)[-max_pts:]
         if len(pts) < 2: return [], []
-        t0 = pts[0][0]
-        return ([(t - t0) / 60 for t, _ in pts],
+        return ([t for t, _ in pts],
                 [v for _, v in pts])
 
     def clear_chart_data(self):
@@ -631,6 +636,29 @@ class SettingsPanel(QFrame):
         _bt.clicked.connect(self.slack_test.emit); scmd_row.addWidget(_bt)
         lay.addLayout(scmd_row)
 
+        lay.addWidget(_sep())
+        lay.addWidget(_lbl("效率過低提醒", C["gray"], 11))
+        le_row = QHBoxLayout(); le_row.setSpacing(8)
+        self._loweff_enable = QCheckBox("啟用")
+        self._loweff_enable.setChecked(bool(cfg.get("loweff_enable", False)))
+        self._loweff_enable.toggled.connect(lambda c: cfg.update({"loweff_enable": c}))
+        le_row.addWidget(self._loweff_enable)
+        le_row.addWidget(_lbl("EXP/s 低於", C["gray"], 12))
+        self._loweff_thr = QLineEdit(str(int(cfg.get("loweff_threshold", 0) or 0)))
+        self._loweff_thr.setFixedWidth(150)
+        self._loweff_thr.setPlaceholderText("例：300000000")
+        self._loweff_thr.textChanged.connect(self._apply_loweff_thr)
+        le_row.addWidget(self._loweff_thr)
+        le_row.addWidget(_lbl("時，於畫面顯示警告", C["gray"], 12))
+        le_row.addStretch()
+        lay.addLayout(le_row)
+
+    def _apply_loweff_thr(self, t):
+        try:
+            self._cfg["loweff_threshold"] = float(t.replace(",", "").strip() or 0)
+        except ValueError:
+            pass
+
     def _slack_browse_setting(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "選擇觸發腳本", "",
@@ -673,9 +701,11 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(QSS)
 
         self._cfg: dict = {"interval": 1, "threshold": 1.0, "chart_max": 28800,
-                           "slack_msg": "！偷懶警告！EXP 已 {sec} 秒沒有增加", "slack_cmd": ""}
+                           "slack_msg": "！偷懶警告！EXP 已 {sec} 秒沒有增加", "slack_cmd": "",
+                           "loweff_enable": False, "loweff_threshold": 0}
         self._vis: dict = {"stats": True, "ttl": True,
                            "chart_pct": True, "chart_eps": True, "log": True}
+        self._load_config()   # 套用上次存檔的設定（在建立 UI 前）
         self._thread: QThread | None = None
         self._worker: MonitorWorker | None = None
         self._guard    = DigitGuard()
@@ -689,6 +719,13 @@ class MainWindow(QMainWindow):
         self._slack_streak = 0
         self._slack_t0: float | None = None
         self._slack_triggered = False
+        self._slack_alert = None
+        self._loweff_alert = None
+        # 本次監控統計
+        self._sess_start_ts = None
+        self._sess_start_pct = None
+        self._sess_prev_pct = None
+        self._sess_gain = 0.0
 
         pg.setConfigOptions(antialias=True)
         self._build_ui()
@@ -759,6 +796,19 @@ class MainWindow(QMainWindow):
         self._settings.slack_test.connect(self._slack_test)
         self._body_lay.addWidget(self._settings)
 
+        # 警示橫幅（顯示在視窗內，OBS 視窗擷取抓得到；取代彈窗）。兩種警告各一條，獨立顯示。
+        def _mk_banner(bg):
+            lb = QLabel(""); lb.setVisible(False); lb.setWordWrap(True)
+            lb.setAlignment(Qt.AlignCenter)
+            lb.setStyleSheet(
+                f"background:{bg}; color:#ffffff; font-size:20px; font-weight:800;"
+                f" font-family:'微軟正黑體'; border-radius:8px; padding:10px;")
+            return lb
+        self._slack_banner  = _mk_banner(C["red"])      # 偷懶警告（紅）
+        self._loweff_banner = _mk_banner("#b8860b")     # 效率過低（暗金/橘）
+        self._body_lay.addWidget(self._slack_banner)
+        self._body_lay.addWidget(self._loweff_banner)
+
         # ─── EXP display card ─────────────────────────────────────────────
         exp_card, exp_lay = _card(16, 14)
         self._body_lay.addWidget(exp_card)
@@ -809,6 +859,16 @@ class MainWindow(QMainWindow):
         thresh_row.addStretch()
         exp_lay.addLayout(thresh_row)
 
+        sess_row = QHBoxLayout(); sess_row.setSpacing(16)
+        self._sess_start_lbl = _lbl("起始 —", C["gray"], 12, mono=True)
+        self._sess_dur_lbl   = _lbl("持續 00:00:00", C["gray"], 12, mono=True)
+        self._sess_gain_lbl  = _lbl("增加 +0.000%", C["green"], 14, mono=True, bold=True)
+        sess_row.addWidget(self._sess_start_lbl)
+        sess_row.addWidget(self._sess_dur_lbl)
+        sess_row.addWidget(self._sess_gain_lbl)
+        sess_row.addStretch()
+        exp_lay.addLayout(sess_row)
+
         # ─── Stats row ────────────────────────────────────────────────────
         self._stats_widget = QWidget()
         self._stats_widget.setStyleSheet("background:transparent;")
@@ -835,7 +895,8 @@ class MainWindow(QMainWindow):
         sh.addWidget(_lbl("😴  偷懶偵測", C["white"], 13, bold=True))
         sh.addStretch()
         self._slack_enable = QCheckBox("啟用")
-        self._slack_enable.setChecked(False)
+        self._slack_enable.setChecked(bool(self._cfg.get("slack_enable", False)))
+        self._slack_enable.toggled.connect(lambda c: self._cfg.update({"slack_enable": c}))
         sh.addWidget(self._slack_enable)
         slack_lay.addLayout(sh)
 
@@ -844,13 +905,15 @@ class MainWindow(QMainWindow):
         scond.addWidget(_lbl("連續", C["gray"], 12))
         self._slack_secs = QSpinBox()
         self._slack_secs.setRange(5, 3600)
-        self._slack_secs.setValue(60)
+        self._slack_secs.setValue(int(self._cfg.get("slack_secs", 60)))
+        self._slack_secs.valueChanged.connect(lambda v: self._cfg.update({"slack_secs": v}))
         self._slack_secs.setFixedWidth(80)
         scond.addWidget(self._slack_secs)
         scond.addWidget(_lbl("秒　且　連續", C["gray"], 12))
         self._slack_count = QSpinBox()
         self._slack_count.setRange(2, 100)
-        self._slack_count.setValue(3)
+        self._slack_count.setValue(int(self._cfg.get("slack_count", 3)))
+        self._slack_count.valueChanged.connect(lambda v: self._cfg.update({"slack_count": v}))
         self._slack_count.setFixedWidth(70)
         scond.addWidget(self._slack_count)
         scond.addWidget(_lbl("筆 EXP 不變 → 警告", C["gray"], 12))
@@ -869,11 +932,11 @@ class MainWindow(QMainWindow):
         # 圖表 1：EXP% 趨勢
         self._chart_pct_widget, cpct_lay = _card(12, 10)
         cpct_lay.addWidget(_lbl("EXP % 趨勢", C["gray"], 11))
-        self._plot = pg.PlotWidget(background=C["plot_bg"])
+        self._plot = pg.PlotWidget(background=C["plot_bg"], axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
         self._plot.setFixedHeight(180)
         self._plot.showGrid(x=True, y=True, alpha=0.12)
         self._plot.setLabel("left",   "EXP %",      color=C["gray"])
-        self._plot.setLabel("bottom", "時間 (分鐘)", color=C["gray"])
+        self._plot.setLabel("bottom", "時間", color=C["gray"])
         self._plot.getAxis("left").setTextPen(ax_pen)
         self._plot.getAxis("bottom").setTextPen(ax_pen)
         self._curve = self._plot.plot(
@@ -886,11 +949,11 @@ class MainWindow(QMainWindow):
         # 圖表 2：EXP/s 歷史（近60秒平均，每秒採樣）
         self._chart_eps_widget, ceps_lay = _card(12, 10)
         ceps_lay.addWidget(_lbl("EXP / 秒  趨勢（每秒採樣近1分鐘均值）", C["gray"], 11))
-        self._plot_eps = pg.PlotWidget(background=C["plot_bg"])
+        self._plot_eps = pg.PlotWidget(background=C["plot_bg"], axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
         self._plot_eps.setFixedHeight(160)
         self._plot_eps.showGrid(x=True, y=True, alpha=0.12)
         self._plot_eps.setLabel("left",   "EXP/s",    color=C["gray"])
-        self._plot_eps.setLabel("bottom", "時間 (分鐘)", color=C["gray"])
+        self._plot_eps.setLabel("bottom", "時間", color=C["gray"])
         self._plot_eps.getAxis("left").setTextPen(ax_pen)
         self._plot_eps.getAxis("bottom").setTextPen(ax_pen)
         self._curve_eps = self._plot_eps.plot(
@@ -1130,6 +1193,32 @@ class MainWindow(QMainWindow):
             pass
 
     # ── 偷懶偵測 ────────────────────────────────────────────────────────────────
+    def _render_alerts(self):
+        self._slack_banner.setText(self._slack_alert or "")
+        self._slack_banner.setVisible(bool(self._slack_alert))
+        self._loweff_banner.setText(self._loweff_alert or "")
+        self._loweff_banner.setVisible(bool(self._loweff_alert))
+
+    def _check_loweff(self):
+        thr = 0.0
+        try:
+            thr = float(self._cfg.get("loweff_threshold", 0) or 0)
+        except (TypeError, ValueError):
+            thr = 0.0
+        if not self._cfg.get("loweff_enable", False) or thr <= 0:
+            if self._loweff_alert is not None:
+                self._loweff_alert = None
+                self._render_alerts()
+            return
+        eps = self._rate.exp_per_sec
+        if eps is None or self._rate.sample_count < 8:
+            return   # 樣本不足，暫不判斷
+        if eps < thr:
+            self._loweff_alert = f"🐢 效率過低：{eps:,.0f} EXP/s（門檻 {thr:,.0f}）"
+        else:
+            self._loweff_alert = None
+        self._render_alerts()
+
     def _slack_normal_style(self):
         self._slack_card.setStyleSheet(
             f"QFrame {{ background:{C['bg2']}; border:1px solid {C['border']};"
@@ -1145,6 +1234,9 @@ class MainWindow(QMainWindow):
         if not self._slack_enable.isChecked():
             self._slack_normal_style()
             self._set_slack_status("未啟用", C["gray"])
+            if self._slack_alert is not None:
+                self._slack_alert = None
+                self._render_alerts()
             return
         now = time.time()
         # EXP 有變 → 正常成長，歸零
@@ -1155,6 +1247,8 @@ class MainWindow(QMainWindow):
             self._slack_triggered = False
             self._slack_normal_style()
             self._set_slack_status("✓ 經驗正常成長", C["green"])
+            self._slack_alert = None
+            self._render_alerts()
             return
         # EXP 不變 → 累計
         self._slack_streak += 1
@@ -1193,16 +1287,12 @@ class MainWindow(QMainWindow):
             msg = raw
         msg = msg.replace(chr(92) + "n", chr(10))   # 讓使用者可用 \n 換行
         try:
-            QApplication.alert(self, 3000)           # 閃爍工作列
+            QApplication.alert(self, 3000)           # 閃爍工作列（不影響 OBS）
         except Exception:
             pass
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Warning)
-        box.setWindowTitle("偷懶警告")
-        box.setText(msg)
-        box.setStandardButtons(QMessageBox.Ok)
-        box.setModal(False)                          # 非阻塞，監控繼續
-        box.show()
+        # 在 UI 上顯示橫幅（OBS 視窗擷取抓得到），不再用彈窗
+        self._slack_alert = msg.replace(chr(10), "　")
+        self._render_alerts()
         # 使用者觸發腳本：情境用環境變數傳入，shell=True 讓使用者自由填指令
         cmd = (self._cfg.get("slack_cmd") or "").strip()
         if cmd:
@@ -1223,6 +1313,7 @@ class MainWindow(QMainWindow):
     # ── Control ───────────────────────────────────────────────────────────────
     def _start(self):
         if self._thread and self._thread.isRunning(): return
+        self._save_config()
         self._prev_pct        = None
         self._prev_exp_int    = None
         self._slack_last_exp  = None
@@ -1231,6 +1322,13 @@ class MainWindow(QMainWindow):
         self._slack_triggered = False
         self._exp_fail_streak = 0
         self._max_exp_est     = None
+        self._sess_start_ts   = time.time()
+        self._sess_start_pct  = None
+        self._sess_prev_pct   = None
+        self._sess_gain       = 0.0
+        self._sess_start_lbl.setText("起始 —")
+        self._sess_dur_lbl.setText("持續 00:00:00")
+        self._sess_gain_lbl.setText("增加 +0.000%")
         self._guard.reset()
         self._rate.reset()
         self._digit_lbl.setText(f"位數學習：學習中 0/{LOCK_REQUIRED}")
@@ -1411,6 +1509,7 @@ class MainWindow(QMainWindow):
             line += f"  [{cap}]"
             self._log_colored(line, C["green"])
 
+            self._update_session(pct_f)
             self._prev_pct = pct_f
             if exp_int is not None:
                 self._prev_exp_int = exp_int
@@ -1455,6 +1554,7 @@ class MainWindow(QMainWindow):
                 f"{pph:.3f}",
                 C["green"] if pph >= 0 else C["red"])
         self._ttl_widget.set_value(ttl, C["yellow"])
+        self._check_loweff()
 
     # ── Chart ─────────────────────────────────────────────────────────────────
     def _clear_charts(self):
@@ -1462,7 +1562,25 @@ class MainWindow(QMainWindow):
         self._curve_eps.setData([], [])
         self._rate.clear_chart_data()
 
+    def _update_session(self, pct_f):
+        if self._sess_start_pct is None:
+            self._sess_start_pct = pct_f
+            self._sess_prev_pct = pct_f
+            self._sess_start_lbl.setText(f"起始 {pct_f:.3f}%")
+        else:
+            d = pct_f - self._sess_prev_pct
+            if d < -50:           # 升等：% 由高掉到低
+                d += 100.0
+            if d > 0:
+                self._sess_gain += d
+            self._sess_prev_pct = pct_f
+            self._sess_gain_lbl.setText(f"增加 +{self._sess_gain:.3f}%")
+
     def _refresh_chart(self):
+        if self._sess_start_ts is not None and self._btn_stop.isEnabled():
+            el = int(time.time() - self._sess_start_ts)
+            self._sess_dur_lbl.setText(
+                f"持續 {el // 3600:02d}:{(el % 3600) // 60:02d}:{el % 60:02d}")
         max_pts = self._cfg.get("chart_max", 28800)
         # EXP% 趨勢
         xs, ys = self._rate.chart_data(max_pts)
@@ -1505,7 +1623,27 @@ class MainWindow(QMainWindow):
         self._log_widget.setTextCursor(cur)
         self._log_widget.ensureCursorVisible()
 
+    def _load_config(self):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data.get("cfg"), dict):
+                self._cfg.update(data["cfg"])
+            if isinstance(data.get("vis"), dict):
+                self._vis.update(data["vis"])
+        except Exception:
+            pass
+
+    def _save_config(self):
+        try:
+            os.makedirs(_CFG_DIR, exist_ok=True)
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump({"cfg": self._cfg, "vis": self._vis}, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
     def closeEvent(self, event):
+        self._save_config()
         self._stop()
         event.accept()
 
