@@ -59,25 +59,69 @@ except Exception:
     _HAS_TEMPLATE = False
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 色彩
+# 主題定義
 # ══════════════════════════════════════════════════════════════════════════════
-C = {
-    "bg":     "#0d1117",
-    "bg2":    "#161b22",
-    "bg3":    "#21262d",
-    "border": "#30363d",
-    "accent": "#1f6feb",
-    "cyan":   "#58a6ff",
-    "green":  "#3fb950",
-    "yellow": "#e3b341",
-    "red":    "#f85149",
-    "gray":   "#8b949e",
-    "white":  "#e6edf3",
-    "purple": "#bc8cff",
-    "plot_bg":"#0d1117",
+THEMES = {
+    "dark": {
+        # GitHub Dark 原始配色
+        "bg":          "#0d1117",
+        "bg2":         "#161b22",
+        "bg3":         "#21262d",
+        "bg_hero":     "#0d1117",
+        "border":      "#30363d",
+        "border_ui":   "#30363d",
+        "accent":      "#e3b341",
+        "cyan":        "#58a6ff",
+        "green":       "#3fb950",
+        "yellow":      "#e3b341",
+        "red":         "#f85149",
+        "gray":        "#8b949e",
+        "white":       "#e6edf3",
+        "white_hero":  "#e6edf3",
+        "purple":      "#bc8cff",
+        "hdr_top":     "#161b22",
+        "hdr_bot":     "#0d1117",
+        "plot_bg":     "#0d1117",
+        "chart_text":  "#8b949e",  # 圖表軸文字（深底→淺字）
+        "bg_stat":     "#21262d",  # StatTile bg（HP/MP/STR 感覺）
+        "stat_text":   "#e6edf3",  # StatTile 數值文字
+        "bg_attr":     "#161b22",  # 偷懶/圖表 panel bg（攻擊力/傷害 感覺）
+    },
+    "maplestory": {
+        # 楓之谷「屬性」面板像素取樣
+        "bg":          "#76828D",
+        "bg2":         "#86939F",
+        "bg3":         "#9CA7B1",
+        "bg_hero":     "#3E6279",
+        "border":      "#5A6470",
+        "border_ui":   "#6E7A88",
+        "accent":      "#B78633",
+        "cyan":        "#D9D9BC",
+        "green":       "#3fb950",
+        "yellow":      "#B78633",
+        "red":         "#e04040",
+        "gray":        "#AABBC6",  # 淺色，在 bg_attr/bg_hero/header 上皆可讀
+        "white":       "#D7DCE0",
+        "white_hero":  "#D9D9BC",
+        "purple":      "#c080f0",
+        "hdr_top":     "#5A6470",
+        "hdr_bot":     "#3A4550",
+        "plot_bg":     "#6C7785",  # 配合 bg_attr，圖表貼齊底板
+        "chart_text":  "#1e2028",  # 圖表軸文字（淺底→深字）
+        "bg_stat":     "#7F8C98",  # StatTile bg（HP/MP/STR/INT 底色，像素取樣）
+        "stat_text":   "#E8EDF1",  # StatTile 數值文字（HP 數字色）
+        "bg_attr":     "#6C7785",  # 偷懶/圖表 panel bg（攻擊力/傷害 底色，像素取樣）
+    },
 }
 
-QSS = f"""
+# ══════════════════════════════════════════════════════════════════════════════
+# 色彩（由主題動態生成）
+# ══════════════════════════════════════════════════════════════════════════════
+C = dict(THEMES["maplestory"])  # 預設楓之谷主題
+
+
+def _build_qss():
+    return f"""
 * {{
     font-family: "微軟正黑體", "Segoe UI", sans-serif;
 }}
@@ -90,43 +134,46 @@ QScrollArea, QScrollArea > QWidget > QWidget {{
     border: none;
 }}
 QPushButton {{
-    border-radius: 6px;
-    padding: 7px 16px;
+    border-radius: 4px;
+    padding: 6px 14px;
     font-size: 13px;
-    font-weight: 600;
+    font-weight: 700;
     border: 1px solid {C['border']};
-    background: {C['bg3']};
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #3a4254, stop:1 #2f3543);
     color: {C['white']};
 }}
 QPushButton:hover {{
-    background: {C['accent']};
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #4a5264, stop:1 #3f4553);
     border-color: {C['accent']};
+    color: #ffffff;
 }}
 QPushButton:pressed {{
-    background: #1158c7;
-    border-color: #1158c7;
+    background: #2f3543;
+    border-color: {C['accent']};
 }}
 QPushButton:disabled {{
-    color: {C['gray']};
+    color: #7a8898;
     border-color: {C['border']};
-    background: {C['bg2']};
+    background: #2f3543;
 }}
-QDoubleSpinBox, QLineEdit {{
-    background: {C['bg3']};
+QDoubleSpinBox, QLineEdit, QSpinBox {{
+    background: #2f3543;
     border: 1px solid {C['border']};
-    border-radius: 6px;
-    padding: 5px 10px;
+    border-radius: 4px;
+    padding: 4px 8px;
     color: {C['white']};
     font-family: Consolas;
     font-size: 13px;
 }}
-QDoubleSpinBox:focus, QLineEdit:focus {{
+QDoubleSpinBox:focus, QLineEdit:focus, QSpinBox:focus {{
     border-color: {C['accent']};
 }}
 QTextEdit {{
-    background: {C['bg2']};
+    background: {C['bg_attr']};
     border: 1px solid {C['border']};
-    border-radius: 6px;
+    border-radius: 4px;
     color: {C['white']};
     font-family: Consolas;
     font-size: 12px;
@@ -140,7 +187,7 @@ QRadioButton {{
 QRadioButton::indicator {{
     width: 14px; height: 14px;
     border-radius: 7px;
-    border: 2px solid {C['gray']};
+    border: 2px solid {C['border']};
     background: {C['bg']};
 }}
 QRadioButton::indicator:checked {{
@@ -154,8 +201,8 @@ QCheckBox {{
 }}
 QCheckBox::indicator {{
     width: 16px; height: 16px;
-    border-radius: 4px;
-    border: 2px solid {C['gray']};
+    border-radius: 3px;
+    border: 2px solid {C['border']};
     background: {C['bg']};
 }}
 QCheckBox::indicator:checked {{
@@ -175,6 +222,18 @@ QScrollBar::handle:vertical {{
 }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar:horizontal {{ height: 0; }}
+/* ── 主題色標籤（切換主題時 re-polish 刷新）─────────────────── */
+QLabel[lbl_clr="gray"]      {{ color: {C['gray']};      }}
+QLabel[lbl_clr="stat_text"] {{ color: {C['stat_text']}; }}
+QLabel[lbl_clr="white"]  {{ color: {C['white']};  }}
+QLabel[lbl_clr="cyan"]   {{ color: {C['cyan']};   }}
+QLabel[lbl_clr="green"]  {{ color: {C['green']};  }}
+QLabel[lbl_clr="red"]    {{ color: {C['red']};    }}
+QLabel[lbl_clr="accent"] {{ color: {C['accent']}; }}
+QLabel[lbl_clr="purple"] {{ color: {C['purple']}; }}
+/* ── 分隔線 ─────────────────────────────────────────────────── */
+QFrame[sep_line="true"]  {{ background: {C['border']}; border:none; }}
+
 """
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -444,13 +503,18 @@ class MonitorWorker(QObject):
 # ══════════════════════════════════════════════════════════════════════════════
 # UI 工具函式
 # ══════════════════════════════════════════════════════════════════════════════
-def _lbl(text, color=None, size=13, bold=False, mono=False):
+def _lbl(text, color="white", size=13, bold=False, mono=False):
+    """
+    color = C dict key（如 "gray", "white", "cyan"）
+    顏色由 QSS QLabel[lbl_clr=...] 控制，切換主題後 re-polish 即可刷新。
+    """
     lb = QLabel(text)
-    color = color or C["white"]
+    lb.setProperty("lbl_clr", color)
     w  = "600" if bold else "normal"
     ff = "Consolas" if mono else "'微軟正黑體','Segoe UI',sans-serif"
+    # 只寫排版，不寫 color（由 QSS 管）
     lb.setStyleSheet(
-        f"color:{color}; font-size:{size}px; font-weight:{w};"
+        f"font-size:{size}px; font-weight:{w};"
         f" font-family:{ff}; background:transparent; border:none;")
     return lb
 
@@ -458,15 +522,16 @@ def _lbl(text, color=None, size=13, bold=False, mono=False):
 def _sep():
     line = QFrame()
     line.setFixedHeight(1)
-    line.setStyleSheet(f"background:{C['border']}; border:none;")
+    line.setProperty("sep_line", True)
+    line.setStyleSheet("border:none;")  # 顏色由 QSS QFrame[sep_line=true] 管
     return line
 
 
 def _card(pad_h=16, pad_v=14):
     f = QFrame()
     f.setStyleSheet(
-        f"QFrame {{ background:{C['bg2']}; border:1px solid {C['border']};"
-        f" border-radius:10px; }}")
+        f"QFrame {{ background:{C['bg2']}; border:1px solid {C['border_ui']};"
+        f" border-radius:6px; }}")
     lay = QVBoxLayout(f)
     lay.setContentsMargins(pad_h, pad_v, pad_h, pad_v)
     lay.setSpacing(8)
@@ -481,29 +546,40 @@ class StatTile(QFrame):
         super().__init__()
         self._vsize = value_size
         self.setStyleSheet(
-            f"QFrame {{ background:{C['bg3']}; border:1px solid {C['border']};"
-            f" border-radius:8px; }}")
+            f"QFrame {{ background:{C['bg_stat']}; border:1px solid {C['border_ui']};"
+            f" border-radius:6px; }}")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 10, 14, 12)
         lay.setSpacing(2)
 
         title_row = QHBoxLayout()
         title_row.setSpacing(6)
-        self._title_lb = _lbl(title, C["white"], 12, bold=True)
+        self._title_lb = _lbl(title, "white", 12, bold=True)
         title_row.addWidget(self._title_lb)
         if subtitle:
-            title_row.addWidget(_lbl(subtitle, C["gray"], 10))
+            title_row.addWidget(_lbl(subtitle, "gray", 10))
         title_row.addStretch()
         lay.addLayout(title_row)
 
-        self._val_lb = _lbl("—", C["cyan"], value_size, bold=True, mono=True)
+        self._val_lb = _lbl("—", "stat_text", value_size, bold=True, mono=True)
         lay.addWidget(self._val_lb)
 
     def set_value(self, text: str, color: str = None):
-        color = color or C["cyan"]
+        color = color or C["stat_text"]
         self._val_lb.setText(text)
         self._val_lb.setStyleSheet(
             f"color:{color}; font-size:{self._vsize}px; font-weight:600;"
+            f" font-family:Consolas; background:transparent; border:none;")
+
+    def refresh_theme(self):
+        """主題切換後重新套用樣式"""
+        self.setStyleSheet(
+            f"QFrame {{ background:{C['bg_stat']}; border:1px solid {C['border_ui']};"
+            f" border-radius:6px; }}")
+        # 重置 value label 顏色（保持目前文字）
+        cur_text = self._val_lb.text()
+        self._val_lb.setStyleSheet(
+            f"color:{C['cyan']}; font-size:{self._vsize}px; font-weight:600;"
             f" font-family:Consolas; background:transparent; border:none;")
 
 
@@ -511,22 +587,23 @@ class StatTile(QFrame):
 # SettingsPanel — 可折疊設定面板
 # ══════════════════════════════════════════════════════════════════════════════
 class SettingsPanel(QFrame):
-    vis_changed = pyqtSignal()
-    slack_test  = pyqtSignal()
+    vis_changed   = pyqtSignal()
+    slack_test    = pyqtSignal()
+    theme_changed = pyqtSignal(str)   # 傳出 "dark" / "maplestory"
 
     def __init__(self, cfg: dict, vis: dict, parent=None):
         super().__init__(parent)
         self._cfg = cfg
         self._vis = vis
         self.setStyleSheet(
-            f"QFrame {{ background:{C['bg2']}; border:1px solid {C['border']};"
-            f" border-radius:10px; }}")
+            f"QFrame {{ background:{C['bg_attr']}; border:1px solid {C['border_ui']};"
+            f" border-radius:6px; }}")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(18, 14, 18, 14)
         lay.setSpacing(12)
 
         # ── 抓取間隔 ───────────────────────────────────────────────────────
-        lay.addWidget(_lbl("抓取間隔", C["gray"], 11))
+        lay.addWidget(_lbl("抓取間隔", "gray", 11))
         int_row = QHBoxLayout()
         int_row.setSpacing(6)
         self._interval_grp = QButtonGroup(self)
@@ -538,7 +615,7 @@ class SettingsPanel(QFrame):
             rb.toggled.connect(lambda chk, v=s: cfg.update({"interval": v}) if chk else None)
             int_row.addWidget(rb)
         int_row.addStretch()
-        int_row.addWidget(_lbl("自訂:", C["gray"], 12))
+        int_row.addWidget(_lbl("自訂:", "gray", 12))
         self._cust = QLineEdit()
         self._cust.setFixedWidth(60)
         self._cust.setPlaceholderText("秒")
@@ -552,7 +629,7 @@ class SettingsPanel(QFrame):
         # ── 誤報門檻 ───────────────────────────────────────────────────────
         thr_row = QHBoxLayout()
         thr_row.setSpacing(8)
-        thr_row.addWidget(_lbl("誤報門檻", C["gray"], 11))
+        thr_row.addWidget(_lbl("誤報門檻", "gray", 11))
         self._thresh = QDoubleSpinBox()
         self._thresh.setRange(0.1, 50.0)
         self._thresh.setSingleStep(0.5)
@@ -560,28 +637,28 @@ class SettingsPanel(QFrame):
         self._thresh.setFixedWidth(90)
         self._thresh.valueChanged.connect(lambda v: cfg.update({"threshold": v}))
         thr_row.addWidget(self._thresh)
-        thr_row.addWidget(_lbl("% 最大經驗 視為誤報門檻", C["gray"], 12))
+        thr_row.addWidget(_lbl("% 最大經驗 視為誤報門檻", "gray", 12))
         thr_row.addStretch()
         lay.addLayout(thr_row)
 
         # ── 經驗位數（輔助辨識）────────────────────────────────────────────
         dig_row = QHBoxLayout()
         dig_row.setSpacing(8)
-        dig_row.addWidget(_lbl("經驗位數", C["gray"], 11))
+        dig_row.addWidget(_lbl("經驗位數", "gray", 11))
         self._expdig = QSpinBox()
         self._expdig.setRange(0, 20)
         self._expdig.setValue(cfg.get("exp_digits", 0))
         self._expdig.setFixedWidth(90)
         self._expdig.valueChanged.connect(lambda v: cfg.update({"exp_digits": v}))
         dig_row.addWidget(self._expdig)
-        dig_row.addWidget(_lbl("位（0=自動）；剔除填充邊界誤判的多餘數字", C["gray"], 12))
+        dig_row.addWidget(_lbl("位（0=自動）；剔除填充邊界誤判的多餘數字", "gray", 12))
         dig_row.addStretch()
         lay.addLayout(dig_row)
 
         lay.addWidget(_sep())
 
         # ── 顯示區塊 ───────────────────────────────────────────────────────
-        lay.addWidget(_lbl("顯示區塊", C["gray"], 11))
+        lay.addWidget(_lbl("顯示區塊", "gray", 11))
         vis_row = QHBoxLayout()
         vis_row.setSpacing(20)
         _vis_map = {
@@ -604,7 +681,7 @@ class SettingsPanel(QFrame):
         # 圖表上限
         cmax_row = QHBoxLayout()
         cmax_row.setSpacing(8)
-        cmax_row.addWidget(_lbl("圖表上限", C["gray"], 11))
+        cmax_row.addWidget(_lbl("圖表上限", "gray", 11))
         self._chart_max_spin = QSpinBox()
         self._chart_max_spin.setRange(100, 500000)
         self._chart_max_spin.setSingleStep(3600)
@@ -612,15 +689,15 @@ class SettingsPanel(QFrame):
         self._chart_max_spin.setFixedWidth(100)
         self._chart_max_spin.valueChanged.connect(lambda v: cfg.update({"chart_max": v}))
         cmax_row.addWidget(self._chart_max_spin)
-        cmax_row.addWidget(_lbl("筆  (預設 28800 = 8 小時)", C["gray"], 11))
+        cmax_row.addWidget(_lbl("筆  (預設 28800 = 8 小時)", "gray", 11))
         cmax_row.addStretch()
         lay.addLayout(cmax_row)
 
         lay.addWidget(_sep())
-        lay.addWidget(_lbl("偷懶偵測動作", C["gray"], 11))
+        lay.addWidget(_lbl("偷懶偵測動作", "gray", 11))
 
         smsg_row = QHBoxLayout(); smsg_row.setSpacing(8)
-        smsg_row.addWidget(_lbl("警告文字", C["gray"], 12))
+        smsg_row.addWidget(_lbl("警告文字", "gray", 12))
         self._slack_msg = QLineEdit(cfg.get("slack_msg", "！偷懶警告！EXP 已 {sec} 秒沒有增加"))
         self._slack_msg.setPlaceholderText("可用 {sec} {exp} {pct} 代入數值")
         self._slack_msg.textChanged.connect(lambda t: cfg.update({"slack_msg": t}))
@@ -628,7 +705,7 @@ class SettingsPanel(QFrame):
         lay.addLayout(smsg_row)
 
         scmd_row = QHBoxLayout(); scmd_row.setSpacing(8)
-        scmd_row.addWidget(_lbl("觸發腳本", C["gray"], 12))
+        scmd_row.addWidget(_lbl("觸發腳本", "gray", 12))
         self._slack_cmd = QLineEdit(cfg.get("slack_cmd", ""))
         self._slack_cmd.setPlaceholderText("例：python hook.py（留空=只跳視窗，不執行）")
         self._slack_cmd.textChanged.connect(lambda t: cfg.update({"slack_cmd": t}))
@@ -640,21 +717,37 @@ class SettingsPanel(QFrame):
         lay.addLayout(scmd_row)
 
         lay.addWidget(_sep())
-        lay.addWidget(_lbl("效率過低提醒", C["gray"], 11))
+        lay.addWidget(_lbl("效率過低提醒", "gray", 11))
         le_row = QHBoxLayout(); le_row.setSpacing(8)
         self._loweff_enable = QCheckBox("啟用")
         self._loweff_enable.setChecked(bool(cfg.get("loweff_enable", False)))
         self._loweff_enable.toggled.connect(lambda c: cfg.update({"loweff_enable": c}))
         le_row.addWidget(self._loweff_enable)
-        le_row.addWidget(_lbl("EXP/s 低於", C["gray"], 12))
+        le_row.addWidget(_lbl("EXP/s 低於", "gray", 12))
         self._loweff_thr = QLineEdit(str(int(cfg.get("loweff_threshold", 0) or 0)))
         self._loweff_thr.setFixedWidth(150)
         self._loweff_thr.setPlaceholderText("例：300000000")
         self._loweff_thr.textChanged.connect(self._apply_loweff_thr)
         le_row.addWidget(self._loweff_thr)
-        le_row.addWidget(_lbl("時，於畫面顯示警告", C["gray"], 12))
+        le_row.addWidget(_lbl("時，於畫面顯示警告", "gray", 12))
         le_row.addStretch()
         lay.addLayout(le_row)
+
+        lay.addWidget(_sep())
+        # ── 介面主題 ────────────────────────────────────────────────────────
+        lay.addWidget(_lbl("介面主題", "gray", 11))
+        theme_row = QHBoxLayout()
+        theme_row.setSpacing(16)
+        self._theme_grp = QButtonGroup(self)
+        for tid, tlabel in [("dark", "🌑  原始深色"), ("maplestory", "🍁  楓之谷")]:
+            rb = QRadioButton(tlabel)
+            if tid == cfg.get("theme", "maplestory"):
+                rb.setChecked(True)
+            self._theme_grp.addButton(rb)
+            rb.toggled.connect(lambda chk, t=tid: self.theme_changed.emit(t) if chk else None)
+            theme_row.addWidget(rb)
+        theme_row.addStretch()
+        lay.addLayout(theme_row)
 
     def _apply_loweff_thr(self, t):
         try:
@@ -701,7 +794,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("楓之谷 EXP 監控")
         self.setMinimumWidth(680)
         self.setMinimumHeight(480)
-        self.setStyleSheet(QSS)
+        self.setStyleSheet(_build_qss())
 
         self._cfg: dict = {"interval": 1, "threshold": 1.0, "chart_max": 28800,
                            "slack_msg": "！偷懶警告！EXP 已 {sec} 秒沒有增加", "slack_cmd": "",
@@ -730,7 +823,12 @@ class MainWindow(QMainWindow):
         self._sess_prev_pct = None
         self._sess_levels = 0
 
-        pg.setConfigOptions(antialias=True)
+        # 套用儲存的主題（在 _load_config 之後）
+        _saved_theme = self._cfg.get("theme", "maplestory")
+        if _saved_theme in THEMES:
+            C.update(THEMES[_saved_theme])
+
+        pg.setConfigOptions(antialias=True, foreground=C["chart_text"])
         self._build_ui()
 
         self._chart_timer = QTimer(self)
@@ -746,15 +844,17 @@ class MainWindow(QMainWindow):
         root_lay.setSpacing(0)
 
         # ─── Header ───────────────────────────────────────────────────────
-        hdr = QFrame()
+        self._hdr = hdr = QFrame()
         hdr.setFixedHeight(50)
         hdr.setStyleSheet(
-            f"QFrame {{ background:{C['bg2']}; border-bottom:1px solid {C['border']}; }}")
+            f"QFrame {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+            f" stop:0 {C['hdr_top']}, stop:1 {C['hdr_bot']});"
+            f" border-bottom: 1px solid {C['border']}; }}")
         hdr_lay = QHBoxLayout(hdr)
         hdr_lay.setContentsMargins(16, 0, 12, 0)
         hdr_lay.setSpacing(10)
 
-        title_lb = QLabel("🍁  楓之谷 EXP 監控")
+        self._title_lb = title_lb = QLabel("🍁  楓之谷 EXP 監控")
         title_lb.setStyleSheet(
             f"color:{C['white']}; font-size:15px; font-weight:700;"
             f" font-family:'微軟正黑體'; background:transparent; border:none;")
@@ -785,7 +885,7 @@ class MainWindow(QMainWindow):
         scroll.setStyleSheet("border:none;")
         root_lay.addWidget(scroll)
 
-        body = QWidget()
+        self._body_widget = body = QWidget()
         body.setStyleSheet(f"background:{C['bg']};")
         scroll.setWidget(body)
         self._body_lay = QVBoxLayout(body)
@@ -797,6 +897,7 @@ class MainWindow(QMainWindow):
         self._settings.setVisible(False)
         self._settings.vis_changed.connect(self._apply_vis)
         self._settings.slack_test.connect(self._slack_test)
+        self._settings.theme_changed.connect(self._apply_theme)
         self._body_lay.addWidget(self._settings)
 
         # 警示橫幅（顯示在視窗內，OBS 視窗擷取抓得到；取代彈窗）。兩種警告各一條，獨立顯示。
@@ -812,41 +913,46 @@ class MainWindow(QMainWindow):
         self._body_lay.addWidget(self._slack_banner)
         self._body_lay.addWidget(self._loweff_banner)
 
-        # ─── EXP display card ─────────────────────────────────────────────
-        exp_card, exp_lay = _card(16, 14)
+        # ─── EXP display card（戰鬥力列樣式：最深底色 + 純白大字）──────────
+        self._exp_card, exp_lay = _card(16, 14)
+        exp_card = self._exp_card  # alias
+        # 覆寫為「戰鬥力列」配色
+        exp_card.setStyleSheet(
+            f"QFrame {{ background:{C['bg_hero']}; border:1px solid {C['border_ui']};"
+            f" border-radius:6px; }}")
         self._body_lay.addWidget(exp_card)
 
-        exp_lay.addWidget(_lbl("EXP 百分比", C["gray"], 11))
+        exp_lay.addWidget(_lbl("EXP 百分比", "gray", 11))
 
         self._pct_lbl = QLabel("—")
         self._pct_lbl.setStyleSheet(
-            f"color:{C['cyan']}; font-size:44px; font-weight:700;"
+            f"color:{C['white_hero']}; font-size:44px; font-weight:700;"
             f" font-family:Consolas; background:transparent;")
         exp_lay.addWidget(self._pct_lbl)
 
         self._pct_bar = QProgressBar()
         self._pct_bar.setRange(0, 10000)
         self._pct_bar.setValue(0)
-        self._pct_bar.setFixedHeight(6)
+        self._pct_bar.setFixedHeight(10)
         self._pct_bar.setTextVisible(False)
         self._pct_bar.setStyleSheet(f"""
             QProgressBar {{
-                background: {C['bg3']};
-                border: none;
-                border-radius: 3px;
+                background: {C['bg']};
+                border: 1px solid {C['border_ui']};
+                border-radius: 4px;
             }}
             QProgressBar::chunk {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 {C['accent']}, stop:1 {C['cyan']});
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #f8c840, stop:1 #d08010);
                 border-radius: 3px;
             }}
         """)
         exp_lay.addWidget(self._pct_bar)
 
         raw_row = QHBoxLayout()
-        raw_row.addWidget(_lbl("原始 EXP", C["gray"], 11))
+        raw_row.addWidget(_lbl("原始 EXP", "gray", 11))
         raw_row.addStretch()
-        self._digit_lbl = _lbl(f"位數學習：學習中 0/{LOCK_REQUIRED}", C["gray"], 11)
+        self._digit_lbl = _lbl(f"位數學習：學習中 0/{LOCK_REQUIRED}", "gray", 11)
         raw_row.addWidget(self._digit_lbl)
         exp_lay.addLayout(raw_row)
 
@@ -856,16 +962,16 @@ class MainWindow(QMainWindow):
         exp_lay.addWidget(self._exp_lbl)
 
         thresh_row = QHBoxLayout()
-        thresh_row.addWidget(_lbl("動態門檻：", C["gray"], 11))
-        self._thresh_lbl = _lbl("—（未建立）", C["gray"], 11, mono=True)
+        thresh_row.addWidget(_lbl("動態門檻：", "gray", 11))
+        self._thresh_lbl = _lbl("—（未建立）", "gray", 11, mono=True)
         thresh_row.addWidget(self._thresh_lbl)
         thresh_row.addStretch()
         exp_lay.addLayout(thresh_row)
 
         sess_row = QHBoxLayout(); sess_row.setSpacing(16)
-        self._sess_start_lbl = _lbl("起始 —", C["gray"], 12, mono=True)
-        self._sess_dur_lbl   = _lbl("持續 00:00:00", C["gray"], 12, mono=True)
-        self._sess_gain_lbl  = _lbl("增加 +0.000%", C["green"], 14, mono=True, bold=True)
+        self._sess_start_lbl = _lbl("起始 —", "gray", 12, mono=True)
+        self._sess_dur_lbl   = _lbl("持續 00:00:00", "gray", 12, mono=True)
+        self._sess_gain_lbl  = _lbl("增加 +0.000%", "green", 14, mono=True, bold=True)
         sess_row.addWidget(self._sess_start_lbl)
         sess_row.addWidget(self._sess_dur_lbl)
         sess_row.addWidget(self._sess_gain_lbl)
@@ -894,8 +1000,11 @@ class MainWindow(QMainWindow):
 
         # ─── 偷懶偵測 card ─────────────────────────────────────────────────
         self._slack_card, slack_lay = _card(16, 14)
+        self._slack_card.setStyleSheet(
+            f"QFrame {{ background:{C['bg_attr']}; border:1px solid {C['border_ui']};"
+            f" border-radius:6px; }}")
         sh = QHBoxLayout()
-        sh.addWidget(_lbl("😴  偷懶偵測", C["white"], 13, bold=True))
+        sh.addWidget(_lbl("😴  偷懶偵測", "white", 13, bold=True))
         sh.addStretch()
         self._slack_enable = QCheckBox("啟用")
         self._slack_enable.setChecked(bool(self._cfg.get("slack_enable", False)))
@@ -905,41 +1014,44 @@ class MainWindow(QMainWindow):
 
         scond = QHBoxLayout()
         scond.setSpacing(8)
-        scond.addWidget(_lbl("連續", C["gray"], 12))
+        scond.addWidget(_lbl("連續", "gray", 12))
         self._slack_secs = QSpinBox()
         self._slack_secs.setRange(5, 3600)
         self._slack_secs.setValue(int(self._cfg.get("slack_secs", 60)))
         self._slack_secs.valueChanged.connect(lambda v: self._cfg.update({"slack_secs": v}))
         self._slack_secs.setFixedWidth(80)
         scond.addWidget(self._slack_secs)
-        scond.addWidget(_lbl("秒　且　連續", C["gray"], 12))
+        scond.addWidget(_lbl("秒　且　連續", "gray", 12))
         self._slack_count = QSpinBox()
         self._slack_count.setRange(2, 100)
         self._slack_count.setValue(int(self._cfg.get("slack_count", 3)))
         self._slack_count.valueChanged.connect(lambda v: self._cfg.update({"slack_count": v}))
         self._slack_count.setFixedWidth(70)
         scond.addWidget(self._slack_count)
-        scond.addWidget(_lbl("筆 EXP 不變 → 警告", C["gray"], 12))
+        scond.addWidget(_lbl("筆 EXP 不變 → 警告", "gray", 12))
         scond.addStretch()
         slack_lay.addLayout(scond)
 
-        hint = _lbl("（警告文字與觸發腳本在 ⚙ 設定中）", C["gray"], 10)
+        hint = _lbl("（警告文字與觸發腳本在 ⚙ 設定中）", "gray", 10)
         slack_lay.addWidget(hint)
-        self._slack_status = _lbl("未啟用", C["gray"], 12, mono=True)
+        self._slack_status = _lbl("未啟用", "gray", 12, mono=True)
         slack_lay.addWidget(self._slack_status)
         self._body_lay.addWidget(self._slack_card)
 
         # ─── Chart ────────────────────────────────────────────────────────
-        ax_pen = pg.mkPen(C["gray"])
+        ax_pen = pg.mkPen(C["chart_text"])
 
         # 圖表 1：EXP% 趨勢
         self._chart_pct_widget, cpct_lay = _card(12, 10)
-        cpct_lay.addWidget(_lbl("EXP % 趨勢", C["gray"], 11))
+        self._chart_pct_widget.setStyleSheet(
+            f"QFrame {{ background:{C['bg_attr']}; border:1px solid {C['border_ui']};"
+            f" border-radius:6px; }}")
+        cpct_lay.addWidget(_lbl("EXP % 趨勢", "gray", 11))
         self._plot = pg.PlotWidget(background=C["plot_bg"], axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
         self._plot.setFixedHeight(180)
         self._plot.showGrid(x=True, y=True, alpha=0.12)
-        self._plot.setLabel("left",   "EXP %",      color=C["gray"])
-        self._plot.setLabel("bottom", "時間", color=C["gray"])
+        self._plot.setLabel("left",   "EXP %",      color=C["chart_text"])
+        self._plot.setLabel("bottom", "時間", color=C["chart_text"])
         self._plot.getAxis("left").setTextPen(ax_pen)
         self._plot.getAxis("bottom").setTextPen(ax_pen)
         self._curve = self._plot.plot(
@@ -951,12 +1063,15 @@ class MainWindow(QMainWindow):
 
         # 圖表 2：EXP/s 歷史（近60秒平均，每秒採樣）
         self._chart_eps_widget, ceps_lay = _card(12, 10)
-        ceps_lay.addWidget(_lbl("EXP / 秒  趨勢（每秒採樣近1分鐘均值）", C["gray"], 11))
+        self._chart_eps_widget.setStyleSheet(
+            f"QFrame {{ background:{C['bg_attr']}; border:1px solid {C['border_ui']};"
+            f" border-radius:6px; }}")
+        ceps_lay.addWidget(_lbl("EXP / 秒  趨勢（每秒採樣近1分鐘均值）", "gray", 11))
         self._plot_eps = pg.PlotWidget(background=C["plot_bg"], axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
         self._plot_eps.setFixedHeight(160)
         self._plot_eps.showGrid(x=True, y=True, alpha=0.12)
-        self._plot_eps.setLabel("left",   "EXP/s",    color=C["gray"])
-        self._plot_eps.setLabel("bottom", "時間", color=C["gray"])
+        self._plot_eps.setLabel("left",   "EXP/s",    color=C["chart_text"])
+        self._plot_eps.setLabel("bottom", "時間", color=C["chart_text"])
         self._plot_eps.getAxis("left").setTextPen(ax_pen)
         self._plot_eps.getAxis("bottom").setTextPen(ax_pen)
         self._curve_eps = self._plot_eps.plot(
@@ -971,18 +1086,22 @@ class MainWindow(QMainWindow):
         self._btn_start = QPushButton("▶  開始監控")
         self._btn_start.setFixedHeight(38)
         self._btn_start.setStyleSheet(
-            f"QPushButton {{ background:#1a7f37; color:{C['white']};"
-            f" border:none; border-radius:6px; font-size:13px; font-weight:600; }}"
-            f"QPushButton:hover {{ background:#2da44e; }}")
+            f"QPushButton {{ background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"stop:0 #3aaa50,stop:1 #1a7a30); color:#ffffff;"
+            f" border:1px solid #1a7a30; border-radius:5px; font-size:13px; font-weight:700; }}"
+            f"QPushButton:hover {{ background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"stop:0 #4acc60,stop:1 #2a9a40); border-color:#2a9a40; }}")
         self._btn_start.clicked.connect(self._start)
 
         self._btn_stop = QPushButton("■  停止")
         self._btn_stop.setFixedHeight(38)
         self._btn_stop.setEnabled(False)
         self._btn_stop.setStyleSheet(
-            f"QPushButton {{ background:#b91c1c; color:{C['white']};"
-            f" border:none; border-radius:6px; font-size:13px; font-weight:600; }}"
-            f"QPushButton:hover {{ background:#dc2626; }}")
+            f"QPushButton {{ background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"stop:0 #c03030,stop:1 #882020); color:#ffffff;"
+            f" border:1px solid #882020; border-radius:5px; font-size:13px; font-weight:700; }}"
+            f"QPushButton:hover {{ background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"stop:0 #e04040,stop:1 #b02828); border-color:#b02828; }}")
         self._btn_stop.clicked.connect(self._stop)
 
         btn_clear_log = QPushButton("清除紀錄")
@@ -1161,7 +1280,7 @@ class MainWindow(QMainWindow):
         dlg = QDialog(self); dlg.setWindowTitle("校準辨識（一次性）")
         dlg.setMaximumWidth(860)
         v = QVBoxLayout(dlg)
-        v.addWidget(_lbl("下圖是目前擷取到的『經驗列』。請照畫面上看到的、輸入 EXP 數字與百分比：", C["white"], 12))
+        v.addWidget(_lbl("下圖是目前擷取到的『經驗列』。請照畫面上看到的、輸入 EXP 數字與百分比：", "white", 12))
         rgb = cv2.cvtColor(prev, cv2.COLOR_BGR2RGB)
         hh, ww = rgb.shape[:2]
         qimg = QImage(rgb.tobytes(), ww, hh, 3 * ww, QImage.Format_RGB888)
@@ -1174,9 +1293,9 @@ class MainWindow(QMainWindow):
         v.addWidget(lblimg)
         exp_in = QLineEdit(); exp_in.setPlaceholderText("EXP 數字（不含逗號），例：35140164989579")
         pct_in = QLineEdit(); pct_in.setPlaceholderText("百分比，例：86.311")
-        v.addWidget(_lbl("EXP 數字（不含逗號）", C["gray"], 11)); v.addWidget(exp_in)
-        v.addWidget(_lbl("百分比", C["gray"], 11)); v.addWidget(pct_in)
-        v.addWidget(_lbl("提示：一個數字通常涵蓋不到 0~9 全部，依提示對「含缺少數字」的畫面多校準幾張即可。", C["gray"], 10))
+        v.addWidget(_lbl("EXP 數字（不含逗號）", "gray", 11)); v.addWidget(exp_in)
+        v.addWidget(_lbl("百分比", "gray", 11)); v.addWidget(pct_in)
+        v.addWidget(_lbl("提示：一個數字通常涵蓋不到 0~9 全部，依提示對「含缺少數字」的畫面多校準幾張即可。", "gray", 10))
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
         v.addWidget(bb)
@@ -1485,7 +1604,7 @@ class MainWindow(QMainWindow):
 
             self._pct_lbl.setText(f"{pct}%")
             self._pct_lbl.setStyleSheet(
-                f"color:{C['cyan']}; font-size:44px; font-weight:700;"
+                f"color:{C['white_hero']}; font-size:44px; font-weight:700;"
                 f" font-family:Consolas; background:transparent;")
             self._pct_bar.setValue(int(pct_f * 100))
             self._exp_lbl.setText(exp or "—")
@@ -1518,7 +1637,7 @@ class MainWindow(QMainWindow):
                 self._prev_exp_int = exp_int
         else:
             self._pct_lbl.setStyleSheet(
-                f"color:{C['yellow']}; font-size:44px; font-weight:700;"
+                f"color:{C['accent']}; font-size:44px; font-weight:700;"
                 f" font-family:Consolas; background:transparent;")
             self._set_status(f"誤報：{reason}", C["yellow"])
             self._log_colored(
@@ -1555,8 +1674,8 @@ class MainWindow(QMainWindow):
         if pph is not None:
             self._tile_pph.set_value(
                 f"{pph:.3f}",
-                C["green"] if pph >= 0 else C["red"])
-        self._ttl_widget.set_value(ttl, C["yellow"])
+                C["cyan"] if pph >= 0 else C["red"])
+        self._ttl_widget.set_value(ttl, C["cyan"])
         self._check_loweff()
 
     # ── Chart ─────────────────────────────────────────────────────────────────
@@ -1614,7 +1733,7 @@ class MainWindow(QMainWindow):
             f"color:{color}; font-size:15px; background:transparent; border:none;")
 
     def _log_info(self, msg: str):
-        self._log_colored(f"i  {msg}", C["gray"])
+        self._log_colored(f"i  {msg}", C["white"])
 
     def _log_warn(self, msg: str):
         self._log_colored(f"!  {msg}", C["yellow"])
@@ -1633,6 +1752,96 @@ class MainWindow(QMainWindow):
         cur.insertText(prefix + msg + chr(10))
         self._log_widget.setTextCursor(cur)
         self._log_widget.ensureCursorVisible()
+
+
+    # ── 主題切換 ─────────────────────────────────────────────────────────────
+    def _apply_theme(self, name: str):
+        """切換 UI 主題：name = 'dark' | 'maplestory'"""
+        global C
+        if name not in THEMES:
+            return
+        C.update(THEMES[name])
+        self._cfg["theme"] = name
+
+        # 重建並套用 QSS
+        self.setStyleSheet(_build_qss())
+
+        # 更新 pyqtgraph 全域前景色
+        pg.setConfigOptions(foreground=C["chart_text"])
+
+        # Header 漸層
+        self._hdr.setStyleSheet(
+            f"QFrame {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+            f" stop:0 {C['hdr_top']}, stop:1 {C['hdr_bot']});"
+            f" border-bottom: 1px solid {C['border']}; }}")
+
+        # 標題標籤
+        self._title_lb.setStyleSheet(
+            f"color:{C['white']}; font-size:15px; font-weight:700;"
+            f" font-family:'微軟正黑體'; background:transparent; border:none;")
+
+        # Body 背景
+        self._body_widget.setStyleSheet(f"background:{C['bg']};")
+
+        # EXP hero 卡
+        self._exp_card.setStyleSheet(
+            f"QFrame {{ background:{C['bg_hero']}; border:1px solid {C['border_ui']};"
+            f" border-radius:6px; }}")
+
+        # StatTiles
+        for tile in [self._tile_eps, self._tile_pph, self._ttl_widget]:
+            tile.refresh_theme()
+
+        # 偷懶 card + 圖表 cards（bg_attr）
+        _attr_ss = (f"QFrame {{ background:{C['bg_attr']}; border:1px solid {C['border_ui']};"
+                    f" border-radius:6px; }}")
+        self._slack_card.setStyleSheet(_attr_ss)
+        self._chart_pct_widget.setStyleSheet(_attr_ss)
+        self._chart_eps_widget.setStyleSheet(_attr_ss)
+
+        # 設定面板框
+        self._settings.setStyleSheet(
+            f"QFrame {{ background:{C['bg_attr']}; border:1px solid {C['border_ui']};"
+            f" border-radius:6px; }}")
+
+        # 圖表軸文字、背景
+        ax_pen = pg.mkPen(C["chart_text"])
+        for plot_w in [self._plot, self._plot_eps]:
+            plot_w.setBackground(C["plot_bg"])
+            plot_w.getAxis("left").setTextPen(ax_pen)
+            plot_w.getAxis("bottom").setTextPen(ax_pen)
+            plot_w.getAxis("left").setPen(ax_pen)
+            plot_w.getAxis("bottom").setPen(ax_pen)
+
+        # 軸標題（setLabel 用獨立 color 參數）
+        self._plot.setLabel("left",   "EXP %",   color=C["chart_text"])
+        self._plot.setLabel("bottom", "時間",     color=C["chart_text"])
+        self._plot_eps.setLabel("left",   "EXP/s", color=C["chart_text"])
+        self._plot_eps.setLabel("bottom", "時間",  color=C["chart_text"])
+
+        # 曲線顏色
+        self._curve.setPen(pg.mkPen(C["cyan"], width=2))
+        self._curve.setSymbolBrush(pg.mkBrush(C["cyan"]))
+        self._curve_eps.setPen(pg.mkPen(C["green"], width=2))
+        self._curve_eps.setSymbolBrush(pg.mkBrush(C["green"]))
+
+        # EXP % 大字
+        self._pct_lbl.setStyleSheet(
+            f"color:{C['white_hero']}; font-size:44px; font-weight:700;"
+            f" font-family:Consolas; background:transparent;")
+
+        # 狀態列文字（inline styled，非 _lbl）
+        self._status_lbl.setStyleSheet(
+            f"color:{C['gray']}; font-size:12px; background:transparent; border:none;")
+        self._status_dot.setStyleSheet(
+            f"color:{C['gray']}; font-size:15px; background:transparent; border:none;")
+
+        # 重新 polish 所有 QLabel（刷新 lbl_clr property 顏色）
+        from PyQt5.QtWidgets import QLabel as _QLabel
+        for lb in self.findChildren(_QLabel):
+            lb.style().unpolish(lb)
+            lb.style().polish(lb)
+            lb.update()
 
     def _load_config(self):
         try:
@@ -1661,7 +1870,7 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     # ── DPI 感知必須在 QApplication 之前設定 ──────────────────────────────
-    # 否則 GetClientRect/ClientToScreen 會回傳「邏輯像素」(被縮放虛擬化)，
+    # 否則 GetClientRect/ClientToScreen 會回傳「邏輯像素」(被縮放虛擬化),
     # 與 mss 抓的「物理像素」對不上 → 算出的視窗底部偏高 → EXP 條被切掉。
     try:
         set_dpi_awareness()

@@ -1,0 +1,20 @@
+{
+  "cfg": {
+    "interval": 1,
+    "threshold": 1.0,
+    "chart_max": 28800,
+    "slack_msg": "！偷懶警告！EXP 已 {sec} 秒沒有增加",
+    "slack_cmd": "",
+    "loweff_enable": false,
+    "loweff_threshold": 0,
+    "theme": "maplestory",
+    "slack_enable": false
+  },
+  "vis": {
+    "stats": true,
+    "ttl": true,
+    "chart_pct": false,
+    "chart_eps": true,
+    "log": true
+  }
+}
