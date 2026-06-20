@@ -13,12 +13,12 @@ import numpy as np
 import cv2
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QDoubleSpinBox, QTextEdit,
+    QLabel, QPushButton, QDoubleSpinBox, QTextEdit, QGridLayout,
     QButtonGroup, QRadioButton, QLineEdit, QFrame,
     QCheckBox, QScrollArea, QProgressBar, QSizePolicy, QSpinBox, QMessageBox, QFileDialog, QDialog, QDialogButtonBox,
 )
-from PyQt5.QtCore import Qt, QThread, QObject, pyqtSignal, pyqtSlot, QTimer
-from PyQt5.QtGui import QColor, QTextCursor, QFont, QImage, QPixmap
+from PyQt5.QtCore import Qt, QThread, QObject, pyqtSignal, pyqtSlot, QTimer, QSize, QPointF, QRectF
+from PyQt5.QtGui import QColor, QTextCursor, QFont, QImage, QPixmap, QIcon, QPainter
 import pyqtgraph as pg
 
 # ── Core module ──────────────────────────────────────────────────────────────
@@ -503,6 +503,26 @@ class MonitorWorker(QObject):
 # ══════════════════════════════════════════════════════════════════════════════
 # UI 工具函式
 # ══════════════════════════════════════════════════════════════════════════════
+def _gear_icon(size=20, color="#c8c8c8"):
+    """以 QPainter 畫一個齒輪圖示（不依賴字型）。"""
+    import math
+    pm = QPixmap(size, size); pm.fill(Qt.transparent)
+    p = QPainter(pm); p.setRenderHint(QPainter.Antialiasing, True)
+    p.setPen(Qt.NoPen); p.setBrush(QColor(color))
+    cx = cy = size / 2.0
+    body = size * 0.30
+    tw   = size * 0.16
+    for i in range(8):
+        p.save(); p.translate(cx, cy); p.rotate(i * 45.0)
+        p.drawRoundedRect(QRectF(-tw / 2, -(body + size * 0.16), tw, size * 0.22), 1, 1)
+        p.restore()
+    p.drawEllipse(QPointF(cx, cy), body, body)
+    p.setCompositionMode(QPainter.CompositionMode_Clear)
+    p.drawEllipse(QPointF(cx, cy), body * 0.42, body * 0.42)
+    p.end()
+    return QIcon(pm)
+
+
 def _lbl(text, color="white", size=13, bold=False, mono=False):
     """
     color = C dict key（如 "gray", "white", "cyan"）
@@ -590,6 +610,7 @@ class SettingsPanel(QFrame):
     vis_changed   = pyqtSignal()
     slack_test    = pyqtSignal()
     theme_changed = pyqtSignal(str)   # 傳出 "dark" / "maplestory"
+    aot_changed   = pyqtSignal(bool)  # 視窗總是在上
 
     def __init__(self, cfg: dict, vis: dict, parent=None):
         super().__init__(parent)
@@ -659,8 +680,6 @@ class SettingsPanel(QFrame):
 
         # ── 顯示區塊 ───────────────────────────────────────────────────────
         lay.addWidget(_lbl("顯示區塊", "gray", 11))
-        vis_row = QHBoxLayout()
-        vis_row.setSpacing(20)
         _vis_map = {
             "stats":     "EXP/s & %/hr",
             "ttl":       "預計升等",
@@ -669,15 +688,23 @@ class SettingsPanel(QFrame):
             "chart_eps": "EXP/s 趨勢圖",
             "log":       "紀錄面板",
         }
+        vis_grid = QGridLayout()
+        vis_grid.setHorizontalSpacing(14)
+        vis_grid.setVerticalSpacing(6)
         self._vis_cbs: dict[str, QCheckBox] = {}
-        for key, label in _vis_map.items():
+        for i, (key, label) in enumerate(_vis_map.items()):
             cb = QCheckBox(label)
             cb.setChecked(vis.get(key, True))
             cb.toggled.connect(lambda chk, k=key: self._on_vis(k, chk))
             self._vis_cbs[key] = cb
-            vis_row.addWidget(cb)
-        vis_row.addStretch()
-        lay.addLayout(vis_row)
+            vis_grid.addWidget(cb, i // 3, i % 3)   # 每列 3 個，自動換行
+        vis_grid.setColumnStretch(3, 1)
+        lay.addLayout(vis_grid)
+
+        self._aot_cb = QCheckBox("視窗總是在最上層")
+        self._aot_cb.setChecked(bool(cfg.get("always_on_top", False)))
+        self._aot_cb.toggled.connect(self.aot_changed.emit)
+        lay.addWidget(self._aot_cb)
 
         # 圖表上限
         cmax_row = QHBoxLayout()
@@ -700,7 +727,8 @@ class SettingsPanel(QFrame):
         smsg_row = QHBoxLayout(); smsg_row.setSpacing(8)
         smsg_row.addWidget(_lbl("警告文字", "gray", 12))
         self._slack_msg = QLineEdit(cfg.get("slack_msg", "！偷懶警告！EXP 已 {sec} 秒沒有增加"))
-        self._slack_msg.setPlaceholderText("可用 {sec} {exp} {pct} 代入數值")
+        self._slack_msg.setMinimumWidth(80)
+        self._slack_msg.setPlaceholderText("可用 {sec}{exp}{pct}")
         self._slack_msg.textChanged.connect(lambda t: cfg.update({"slack_msg": t}))
         smsg_row.addWidget(self._slack_msg)
         lay.addLayout(smsg_row)
@@ -708,7 +736,8 @@ class SettingsPanel(QFrame):
         scmd_row = QHBoxLayout(); scmd_row.setSpacing(8)
         scmd_row.addWidget(_lbl("觸發腳本", "gray", 12))
         self._slack_cmd = QLineEdit(cfg.get("slack_cmd", ""))
-        self._slack_cmd.setPlaceholderText("例：python hook.py（留空=只跳視窗，不執行）")
+        self._slack_cmd.setMinimumWidth(80)
+        self._slack_cmd.setPlaceholderText("例：python hook.py（留空不執行）")
         self._slack_cmd.textChanged.connect(lambda t: cfg.update({"slack_cmd": t}))
         scmd_row.addWidget(self._slack_cmd)
         _bb = QPushButton("瀏覽"); _bb.setFixedWidth(56)
@@ -730,7 +759,7 @@ class SettingsPanel(QFrame):
         self._loweff_thr.setPlaceholderText("例：300000000")
         self._loweff_thr.textChanged.connect(self._apply_loweff_thr)
         le_row.addWidget(self._loweff_thr)
-        le_row.addWidget(_lbl("時，於畫面顯示警告", "gray", 12))
+        le_row.addWidget(_lbl("時警告", "gray", 12))
         le_row.addStretch()
         lay.addLayout(le_row)
 
@@ -788,18 +817,98 @@ class SettingsPanel(QFrame):
 # ══════════════════════════════════════════════════════════════════════════════
 # 主視窗
 # ══════════════════════════════════════════════════════════════════════════════
+class MiniWindow(QWidget):
+    """精簡置頂小窗：只顯示重點數值、無圖表，可拖曳、冒號對齊、支援主題。"""
+    def __init__(self, on_restore=None, parent=None):
+        # 用正常頂層視窗（非 Qt.Tool），才會在工作列出現、OBS 視窗擷取才抓得到
+        super().__init__(parent, Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setWindowTitle("EXP 迷你監控")
+        self._drag = None
+        self._on_restore = on_restore
+        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
+        self._card = QFrame()
+        v = QVBoxLayout(self._card); v.setContentsMargins(12, 8, 12, 10); v.setSpacing(5)
+        top = QHBoxLayout()
+        self._title = QLabel("EXP 迷你監控")
+        top.addWidget(self._title); top.addStretch()
+        self._restore = QPushButton("🗖 還原")
+        self._restore.setFixedHeight(20); self._restore.setToolTip("還原成完整視窗")
+        self._restore.clicked.connect(lambda: self._on_restore() if self._on_restore else None)
+        top.addWidget(self._restore)
+        v.addLayout(top)
+
+        LBLW = 104
+        self._labels = []; self._values = []
+        def row(text):
+            h = QHBoxLayout(); h.setSpacing(0)
+            lab = QLabel(text); lab.setFixedWidth(LBLW); lab.setFixedHeight(24)
+            lab.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            val = QLabel("：—"); val.setFixedHeight(24)
+            val.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            self._labels.append(lab); self._values.append(val)
+            h.addWidget(lab); h.addWidget(val); h.addStretch()
+            return h, val
+        r1, self.dur_l     = row("持續時間")
+        r2, self.exp_num_l = row("當前經驗")
+        r3, self.exp_l     = row("EXP")
+        r4, self.eps_l     = row("EXP/秒")
+        r5, self.pph_l     = row("EXP%/小時")
+        r6, self.ttl_l     = row("預計升等時間")
+        for _r in (r1, r2, r3, r4, r5, r6):
+            v.addLayout(_r)
+        outer.addWidget(self._card)
+        self.resize(330, 205)
+        self.apply_theme()
+
+    def apply_theme(self):
+        bg     = C.get("bg2", "#161b22")
+        border = C.get("border_ui", C.get("border", "#30363d"))
+        gray   = C.get("gray", "#8b949e")
+        white  = C.get("white", "#e6edf3")
+        self._card.setStyleSheet(f"QFrame {{ background:{bg}; border:1px solid {border}; border-radius:8px; }}")
+        self._title.setStyleSheet(f"color:{gray}; font-size:11px; background:transparent; border:none;")
+        self._restore.setStyleSheet(
+            f"QPushButton{{color:{gray}; border:1px solid {border}; border-radius:4px;"
+            f" background:transparent; font-size:11px; padding:0 6px;}}"
+            f"QPushButton:hover{{color:{white}; border-color:{white};}}")
+        _ff = "'Microsoft JhengHei','微軟正黑體',Consolas"
+        for lab in self._labels:
+            lab.setStyleSheet(f"color:{gray}; font-size:14px; font-family:{_ff};"
+                              f" background:transparent; border:none;")
+        for val in self._values:
+            val.setStyleSheet(f"color:{white}; font-size:14px; font-family:{_ff};"
+                              f" background:transparent; border:none;")
+
+    def set_data(self, dur, cur_exp, exp_pct, eps, pph, ttl):
+        self.dur_l.setText("： " + dur)
+        self.exp_num_l.setText("： " + cur_exp)
+        self.exp_l.setText("： " + exp_pct)
+        self.eps_l.setText("： " + eps)
+        self.pph_l.setText("： " + pph)
+        self.ttl_l.setText("： " + ttl)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._drag = e.globalPos() - self.frameGeometry().topLeft(); e.accept()
+    def mouseMoveEvent(self, e):
+        if self._drag is not None and (e.buttons() & Qt.LeftButton):
+            self.move(e.globalPos() - self._drag); e.accept()
+    def mouseReleaseEvent(self, e):
+        self._drag = None
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         set_dpi_awareness()
         self.setWindowTitle("楓之谷 EXP 監控")
-        self.setMinimumWidth(680)
+        self.setMinimumWidth(650)
         self.setMinimumHeight(480)
+        self.resize(650, 720)
         self.setStyleSheet(_build_qss())
 
         self._cfg: dict = {"interval": 1, "threshold": 1.0, "chart_max": 28800,
                            "slack_msg": "！偷懶警告！EXP 已 {sec} 秒沒有增加", "slack_cmd": "",
-                           "loweff_enable": False, "loweff_threshold": 0}
+                           "loweff_enable": False, "loweff_threshold": 0, "always_on_top": False}
         self._vis: dict = {"stats": True, "ttl": True,
                            "chart_pct": True, "chart_eps": True, "log": True}
         self._load_config()   # 套用上次存檔的設定（在建立 UI 前）
@@ -823,6 +932,8 @@ class MainWindow(QMainWindow):
         self._sess_start_pct = None
         self._sess_prev_pct = None
         self._sess_levels = 0
+        self._sess_gain_val = 0.0
+        self._mini = None
 
         # 套用儲存的主題（在 _load_config 之後）
         _saved_theme = self._cfg.get("theme", "maplestory")
@@ -831,6 +942,8 @@ class MainWindow(QMainWindow):
 
         pg.setConfigOptions(antialias=True, foreground=C["chart_text"])
         self._build_ui()
+        if self._cfg.get("always_on_top", False):
+            self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
 
         self._chart_timer = QTimer(self)
         self._chart_timer.timeout.connect(self._refresh_chart)
@@ -871,7 +984,9 @@ class MainWindow(QMainWindow):
         hdr_lay.addWidget(self._status_lbl)
         hdr_lay.addWidget(self._status_dot)
 
-        self._btn_cfg = QPushButton("⚙")
+        self._btn_cfg = QPushButton()
+        self._btn_cfg.setIcon(_gear_icon(20, C["gray"]))
+        self._btn_cfg.setIconSize(QSize(20, 20))
         self._btn_cfg.setFixedSize(36, 36)
         self._btn_cfg.setToolTip("設定")
         self._btn_cfg.clicked.connect(self._toggle_settings)
@@ -899,6 +1014,7 @@ class MainWindow(QMainWindow):
         self._settings.vis_changed.connect(self._apply_vis)
         self._settings.slack_test.connect(self._slack_test)
         self._settings.theme_changed.connect(self._apply_theme)
+        self._settings.aot_changed.connect(self._apply_always_on_top)
         self._body_lay.addWidget(self._settings)
 
         # 警示橫幅（顯示在視窗內，OBS 視窗擷取抓得到；取代彈窗）。兩種警告各一條，獨立顯示。
@@ -921,7 +1037,6 @@ class MainWindow(QMainWindow):
         exp_card.setStyleSheet(
             f"QFrame {{ background:{C['bg_hero']}; border:1px solid {C['border_ui']};"
             f" border-radius:6px; }}")
-        self._body_lay.addWidget(exp_card)
 
         exp_lay.addWidget(_lbl("EXP 百分比", "gray", 11))
 
@@ -978,6 +1093,43 @@ class MainWindow(QMainWindow):
         sess_row.addWidget(self._sess_gain_lbl)
         sess_row.addStretch()
         exp_lay.addLayout(sess_row)
+
+        # 開始/停止移到 EXP 卡片右側
+        self._btn_start = QPushButton("▶  開始監控")
+        self._btn_start.setFixedHeight(40); self._btn_start.setMinimumWidth(124)
+        self._btn_start.setStyleSheet(
+            f"QPushButton {{ background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"stop:0 #3aaa50,stop:1 #1a7a30); color:#ffffff;"
+            f" border:1px solid #1a7a30; border-radius:5px; font-size:13px; font-weight:700; }}"
+            f"QPushButton:hover {{ background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"stop:0 #4acc60,stop:1 #2a9a40); border-color:#2a9a40; }}")
+        self._btn_start.clicked.connect(self._start)
+        self._btn_stop = QPushButton("■  停止")
+        self._btn_stop.setFixedHeight(40); self._btn_stop.setMinimumWidth(124)
+        self._btn_stop.setEnabled(False)
+        self._btn_stop.setStyleSheet(
+            f"QPushButton {{ background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"stop:0 #c03030,stop:1 #882020); color:#ffffff;"
+            f" border:1px solid #882020; border-radius:5px; font-size:13px; font-weight:700; }}"
+            f"QPushButton:hover {{ background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"stop:0 #e04040,stop:1 #b02828); border-color:#b02828; }}")
+        self._btn_stop.clicked.connect(self._stop)
+        self._btn_mini = QPushButton("🗖 迷你視窗")
+        self._btn_mini.setFixedHeight(40); self._btn_mini.setMinimumWidth(124)
+        self._btn_mini.setStyleSheet(
+            "QPushButton{background:#2a2f3a;color:#e6edf3;border:1px solid #3a4150;"
+            "border-radius:5px;font-size:13px;font-weight:600;}"
+            "QPushButton:hover{background:#343b48;}")
+        self._btn_mini.clicked.connect(self._toggle_mini)
+        _btncol = QVBoxLayout(); _btncol.setSpacing(8)
+        _btncol.addWidget(self._btn_start)
+        _btncol.addWidget(self._btn_stop)
+        _btncol.addWidget(self._btn_mini)
+        _btncol.addStretch()
+        _exp_outer = QHBoxLayout(); _exp_outer.setSpacing(10)
+        _exp_outer.addWidget(exp_card, 1)
+        _exp_outer.addLayout(_btncol)
+        self._body_lay.addLayout(_exp_outer)
 
         # ─── Stats row ────────────────────────────────────────────────────
         self._stats_widget = QWidget()
@@ -1084,27 +1236,6 @@ class MainWindow(QMainWindow):
         ctrl_row = QHBoxLayout()
         ctrl_row.setSpacing(8)
 
-        self._btn_start = QPushButton("▶  開始監控")
-        self._btn_start.setFixedHeight(38)
-        self._btn_start.setStyleSheet(
-            f"QPushButton {{ background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            f"stop:0 #3aaa50,stop:1 #1a7a30); color:#ffffff;"
-            f" border:1px solid #1a7a30; border-radius:5px; font-size:13px; font-weight:700; }}"
-            f"QPushButton:hover {{ background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            f"stop:0 #4acc60,stop:1 #2a9a40); border-color:#2a9a40; }}")
-        self._btn_start.clicked.connect(self._start)
-
-        self._btn_stop = QPushButton("■  停止")
-        self._btn_stop.setFixedHeight(38)
-        self._btn_stop.setEnabled(False)
-        self._btn_stop.setStyleSheet(
-            f"QPushButton {{ background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            f"stop:0 #c03030,stop:1 #882020); color:#ffffff;"
-            f" border:1px solid #882020; border-radius:5px; font-size:13px; font-weight:700; }}"
-            f"QPushButton:hover {{ background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            f"stop:0 #e04040,stop:1 #b02828); border-color:#b02828; }}")
-        self._btn_stop.clicked.connect(self._stop)
-
         btn_clear_log = QPushButton("清除紀錄")
         btn_clear_log.setFixedHeight(38)
         btn_clear_log.clicked.connect(self._clear_log)
@@ -1123,8 +1254,7 @@ class MainWindow(QMainWindow):
         btn_calib.setToolTip("一次性校準：用你自己遊戲畫面建立辨識模板（換客戶端/字體時用）")
         btn_calib.clicked.connect(self._calibrate)
 
-        ctrl_row.addWidget(self._btn_start)
-        ctrl_row.addWidget(self._btn_stop)
+
         ctrl_row.addWidget(btn_clear_log)
         ctrl_row.addWidget(btn_clear_chart)
         ctrl_row.addWidget(btn_diag)
@@ -1142,18 +1272,57 @@ class MainWindow(QMainWindow):
         self._apply_vis()
 
     # ── Settings toggle ───────────────────────────────────────────────────────
+    def _toggle_mini(self):
+        if self._mini is None:
+            self._mini = MiniWindow(on_restore=self._exit_mini)
+        self._mini.move(self.x(), self.y())
+        self._mini.show(); self._mini.raise_()
+        self._update_mini()
+        self.hide()          # 把原視窗收起 → 變成迷你視窗
+
+    def _exit_mini(self):
+        if self._mini is not None:
+            self._mini.hide()
+        self.showNormal(); self.raise_(); self.activateWindow()
+
+    def _update_mini(self):
+        if self._mini is None or not self._mini.isVisible():
+            return
+        sp, cp = self._sess_start_pct, self._prev_pct
+        if self._sess_start_ts is not None:
+            el = int(time.time() - self._sess_start_ts)
+            dur = f"{el // 3600:02d}:{(el % 3600) // 60:02d}:{el % 60:02d}"
+        else:
+            dur = "00:00:00"
+        cur_exp = f"{self._prev_exp_int:,}" if self._prev_exp_int is not None else "—"
+        exp_pct = (f"{sp:.3f}% → {cp:.3f}% (+{self._sess_gain_val:.3f}%)"
+                   if (sp is not None and cp is not None) else "—")
+        eps = self._rate.exp_per_sec
+        pph = self._rate.pct_per_hour
+        eps_s = f"{eps:,.0f}" if eps is not None else "—"
+        pph_s = f"{pph:.3f}" if pph is not None else "—"
+        ttl_s = self._rate.time_to_level(cp) if cp is not None else "—"
+        self._mini.set_data(dur, cur_exp, exp_pct, eps_s, pph_s, ttl_s)
+
+    def _apply_always_on_top(self, on):
+        self._cfg["always_on_top"] = bool(on)
+        flags = self.windowFlags()
+        if on:
+            flags |= Qt.WindowStaysOnTopHint
+        else:
+            flags &= ~Qt.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        self.show()   # 變更旗標後需重新顯示
+
     def _toggle_settings(self):
-        sz    = self.size()
         open_ = not self._settings.isVisible()
         self._settings.setVisible(open_)
         if open_:
             self._btn_cfg.setStyleSheet(
                 f"QPushButton {{ background:{C['accent']}; border-color:{C['accent']};"
-                f" border-radius:6px; color:{C['white']}; font-size:14px;"
-                f" border:1px solid {C['accent']}; }}")
+                f" border-radius:6px; border:1px solid {C['accent']}; }}")
         else:
             self._btn_cfg.setStyleSheet("")
-        self.resize(sz)
 
     def _apply_vis(self):
         sz = self.size()
@@ -1706,6 +1875,7 @@ class MainWindow(QMainWindow):
         gain = self._sess_levels * 100.0 + (pct_f - self._sess_start_pct)
         if gain < 0:
             gain = 0.0
+        self._sess_gain_val = gain
         self._sess_gain_lbl.setText(f"增加 +{gain:.3f}%")
 
     def _refresh_chart(self):
@@ -1725,6 +1895,7 @@ class MainWindow(QMainWindow):
         exs, eys = self._rate.eps_sample_data(max_pts)
         if len(exs) >= 2:
             self._curve_eps.setData(exs, eys)
+        self._update_mini()
 
     # ── Status / Log ──────────────────────────────────────────────────────────
     def _set_status(self, text: str, color: str):
@@ -1764,6 +1935,8 @@ class MainWindow(QMainWindow):
             return
         C.update(THEMES[name])
         self._cfg["theme"] = name
+        if getattr(self, "_mini", None) is not None:
+            self._mini.apply_theme()
 
         # 重建並套用 QSS
         self.setStyleSheet(_build_qss())
@@ -1865,6 +2038,8 @@ class MainWindow(QMainWindow):
             pass
 
     def closeEvent(self, event):
+        if self._mini is not None:
+            self._mini.close()
         self._save_config()
         self._stop()
         event.accept()

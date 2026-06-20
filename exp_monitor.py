@@ -99,12 +99,24 @@ def set_dpi_awareness():
 def find_window():
     """回傳 (hwnd, client_screen_rect) 或 (None, None)。"""
     import win32gui
+
+    # 已知瀏覽器視窗類別——標題可能含 "MapleStory" 但不是遊戲本體
+    _BROWSER_CLASSES = {
+        "Chrome_WidgetWin_1",   # Chrome / Edge / Brave / Opera
+        "MozillaWindowClass",   # Firefox
+        "IEFrame",              # Internet Explorer
+        "ApplicationFrameWindow",  # UWP（Microsoft Edge Legacy）
+    }
+
     found = []
 
     def cb(hwnd, _):
         if not win32gui.IsWindowVisible(hwnd):
             return
         if "MapleStory" not in win32gui.GetWindowText(hwnd):
+            return
+        # 排除瀏覽器：類別名稱不能是已知瀏覽器 class
+        if win32gui.GetClassName(hwnd) in _BROWSER_CLASSES:
             return
         r = win32gui.GetWindowRect(hwnd)
         w, h = r[2]-r[0], r[3]-r[1]
@@ -117,7 +129,6 @@ def find_window():
 
     found.sort(key=lambda x: x[1], reverse=True)
     hwnd = found[0][0]
-    import win32gui
     lt  = win32gui.ClientToScreen(hwnd, (0, 0))
     cr  = win32gui.GetClientRect(hwnd)
     return hwnd, {'left': lt[0], 'top': lt[1],

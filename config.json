@@ -7,7 +7,8 @@
     "slack_cmd": "",
     "loweff_enable": false,
     "loweff_threshold": 0,
-    "theme": "maplestory",
+    "always_on_top": false,
+    "theme": "dark",
     "slack_enable": false
   },
   "vis": {
