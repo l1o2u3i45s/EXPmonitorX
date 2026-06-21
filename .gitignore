@@ -4,3 +4,5 @@ build/
 dist/
 session-export-*/
 debug_images/
+/.build-venv
+/.vs
