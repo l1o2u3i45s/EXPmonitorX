@@ -17,10 +17,10 @@ MapleStory EXP Monitor  v5.1
   2. PrintWindow PW_RENDERFULLCONTENT
   3. Desktop DC BitBlt
 
-OCR：Tesseract（若已安裝）→ EasyOCR 備援
+OCR：PaddleOCR
 
 需求：
-  pip install mss opencv-python pywin32 easyocr
+  pip install mss opencv-python pywin32 paddleocr paddlepaddle
 
 使用方式：
   python exp_monitor.py             正常監控（每 5 秒）
@@ -37,13 +37,6 @@ from datetime import datetime
 
 import cv2
 import numpy as np
-
-# 模板比對 OCR（主要辨識器）＋時間聚合層
-try:
-    from exp_template_ocr import TemplateOCR, ExpTracker
-    _HAS_TEMPLATE = True
-except Exception:
-    _HAS_TEMPLATE = False
 
 # ──────────────────────────────────────────────
 # 設定
@@ -65,10 +58,8 @@ WHITE_HI = np.array([180, 70,  255], np.uint8)
 
 UPSCALE = 8
 
-TESSERACT_PATHS = [
-    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-]
+PADDLE_LANG = "en"
+PADDLE_ENGINE = "paddle"
 OCR_WHITELIST = "0123456789,.[]%"
 
 OCR_FIXES = str.maketrans({
@@ -487,71 +478,150 @@ def preprocess(row_bgr):
 # OCR
 # ──────────────────────────────────────────────
 
-_easyocr_reader = None
-
-def _init_easy():
-    global _easyocr_reader
-    if _easyocr_reader is None:
-        import easyocr
-        print("[INFO] 初始化 EasyOCR...")
-        _easyocr_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
-        print("[INFO] EasyOCR 就緒。")
-    return _easyocr_reader
+_paddle_reader = None
+PADDLE_LAST_ERROR = ""
 
 
-def _setup_tess():
-    try:
-        import pytesseract
-        for p in TESSERACT_PATHS:
-            if os.path.isfile(p):
-                pytesseract.pytesseract.tesseract_cmd = p
+def _init_paddle():
+    global _paddle_reader
+    if _paddle_reader is None:
+        os.environ.setdefault("FLAGS_use_mkldnn", "0")
+        os.environ.setdefault("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "0")
+        try:
+            from paddleocr._pipelines.ocr import PaddleOCR  # PaddleOCR 3.x without top-level imports
+        except Exception:
+            from paddleocr import PaddleOCR  # PaddleOCR 2.x
+
+        print("[INFO] Initializing PaddleOCR...")
+        init_errors = []
+        attempts = [
+            {
+                "lang": PADDLE_LANG,
+                "engine": PADDLE_ENGINE,
+                "use_doc_orientation_classify": False,
+                "use_doc_unwarping": False,
+                "use_textline_orientation": False,
+            },
+            {
+                "lang": PADDLE_LANG,
+                "use_doc_orientation_classify": False,
+                "use_doc_unwarping": False,
+                "use_textline_orientation": False,
+            },
+            {
+                "lang": PADDLE_LANG,
+                "use_angle_cls": False,
+                "use_gpu": False,
+                "show_log": False,
+                "enable_mkldnn": False,
+            },
+        ]
+        for kwargs in attempts:
+            try:
+                _paddle_reader = PaddleOCR(**kwargs)
                 break
-        pytesseract.get_tesseract_version()
+            except TypeError as e:
+                init_errors.append(repr(e))
+        if _paddle_reader is None:
+            raise RuntimeError("PaddleOCR init failed: " + " | ".join(init_errors))
+        print("[INFO] PaddleOCR ready.")
+    return _paddle_reader
+
+
+def _setup_paddle():
+    global PADDLE_LAST_ERROR
+    PADDLE_LAST_ERROR = ""
+    try:
+        _init_paddle()
+        img = np.ones((80, 760), dtype=np.uint8) * 255
+        cv2.putText(img, "177,960,562,689,528 [45.430%]",
+                    (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 1.3, 0, 3, cv2.LINE_AA)
+        if not _ocr_paddle(img):
+            raise RuntimeError("PaddleOCR smoke test produced no text")
         return True
-    except Exception:
+    except Exception as e:
+        import traceback
+        PADDLE_LAST_ERROR = traceback.format_exc()
+        print(f"[WARN] PaddleOCR unavailable: {e!r}")
         return False
 
 
-def _ocr_tess(mask):
-    import pytesseract
-    from PIL import Image
-    pil = Image.fromarray(mask)
-    # psm 7 = 單行；psm 6 = 統一區塊；psm 11 = 稀疏文字
-    best = ""
-    for psm in [7, 6, 11]:
-        # oem 1 = 純 LSTM，對細線字（如"1"）辨識較準確
-        cfg = (f"--psm {psm} --oem 1"
-               f" -c tessedit_char_whitelist={OCR_WHITELIST}"
-               f" -c load_system_dawg=0 -c load_freq_dawg=0")
-        t = pytesseract.image_to_string(pil, config=cfg).strip()
-        if len(t) > len(best):
-            best = t
-        if best and '[' in best and ']' in best:
-            break
-    return best
+def _paddle_input(mask):
+    img = mask
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    return img
 
 
-def _ocr_easy(mask):
-    r = _init_easy()
-    res = r.readtext(mask, detail=1, allowlist=OCR_WHITELIST,
-                     paragraph=False, min_size=5,
-                     text_threshold=0.2, low_text=0.2)
-    if not res:
-        return ""
-    res.sort(key=lambda x: x[0][0][0])
-    return " ".join(x[1] for x in res)
+def _collect_paddle_texts(obj):
+    texts = []
+    if obj is None:
+        return texts
+    if hasattr(obj, "res"):
+        texts.extend(_collect_paddle_texts(getattr(obj, "res")))
+    if isinstance(obj, dict):
+        for key in ("rec_texts", "rec_text", "text", "label"):
+            val = obj.get(key)
+            if isinstance(val, str):
+                texts.append(val)
+            elif isinstance(val, (list, tuple)):
+                texts.extend(str(v) for v in val if isinstance(v, str))
+        for key in ("res", "data", "result", "results"):
+            if key in obj:
+                texts.extend(_collect_paddle_texts(obj[key]))
+        return texts
+    if isinstance(obj, (list, tuple)):
+        if len(obj) >= 2 and isinstance(obj[0], str) and isinstance(obj[1], (int, float)):
+            return [obj[0]]
+        if len(obj) >= 2 and isinstance(obj[1], (list, tuple)) and obj[1] and isinstance(obj[1][0], str):
+            return [obj[1][0]]
+        for item in obj:
+            texts.extend(_collect_paddle_texts(item))
+    return texts
 
 
-def run_ocr(mask, use_tess):
-    # Tesseract 優先
-    if use_tess:
+def _ocr_paddle(mask):
+    reader = _init_paddle()
+    img = _paddle_input(mask)
+    if hasattr(reader, "predict"):
         try:
-            t = _ocr_tess(mask)
-            if t: return t, "Tess"
+            result = list(reader.predict(input=img))
+        except TypeError:
+            result = list(reader.predict(img))
+    else:
+        try:
+            result = reader.ocr(img, cls=False)
+        except TypeError:
+            result = reader.ocr(img)
+    texts = [t.strip() for t in _collect_paddle_texts(result) if t and t.strip()]
+    return " ".join(texts)
+
+
+def _init_legacy_ocr():
+    return _init_paddle()
+
+
+def _setup_legacy_ocr():
+    return _setup_paddle()
+
+
+def _ocr_legacy(mask):
+    return _ocr_paddle(mask)
+
+
+def _ocr_legacy_secondary(mask):
+    return _ocr_paddle(mask)
+
+
+def run_ocr(mask, _engine_ready=None):
+    for candidate in (mask, cv2.bitwise_not(mask)):
+        try:
+            text = _ocr_paddle(candidate)
+            if text:
+                return text, "Paddle"
         except Exception:
             pass
-    # 備援：EasyOCR
-    return _ocr_easy(mask), "Easy"
+    return "", "Paddle"
 
 
 # ──────────────────────────────────────────────
@@ -692,15 +762,16 @@ def run_debug():
 
     # 前處理 + OCR
     print("\n── OCR ──")
-    use_tess = _setup_tess()
-    print(f"  Tesseract: {'✓' if use_tess else '✗ (EasyOCR)'}")
-    if not use_tess: _init_easy()
+    paddle_ready = _setup_paddle()
+    print(f"  PaddleOCR: {'ready' if paddle_ready else 'missing'}")
+    if not paddle_ready:
+        return
 
     methods = preprocess(exp_row)
     for name, mask in methods:
         wpx = int(np.sum(mask > 0))
         cv2.imwrite(os.path.join(DEBUG_DIR, f"dbg_mask_{name}.png"), mask)
-        raw, eng = run_ocr(mask, use_tess)
+        raw, eng = run_ocr(mask, paddle_ready)
         e, p = parse(raw)
         print(f"  {name:6s} white={wpx:7d}  [{eng}] {raw!r:35s}  → pct={p} exp={e}")
 
@@ -719,24 +790,11 @@ def run_monitor(interval, exp_digits=0):
     set_dpi_awareness()
     os.makedirs(DEBUG_DIR, exist_ok=True)
 
-    # 主要辨識器：template OCR（形狀比對）＋ ExpTracker（時間聚合）
-    ocr = None
-    tracker = None
-    if _HAS_TEMPLATE:
-        ocr = TemplateOCR()
-        if ocr.is_ready():
-            tracker = ExpTracker()
-            print("[INFO] OCR=Template(shape-match) + ExpTracker")
-        else:
-            ocr = None
-            print("[WARN] 模板未就緒，退回 Tesseract/EasyOCR")
-
-    use_tess = False
-    if ocr is None:
-        use_tess = _setup_tess()
-        if not use_tess:
-            _init_easy()
-        print(f"[INFO] OCR={'Tesseract' if use_tess else 'EasyOCR'}")
+    paddle_ready = _setup_paddle()
+    if not paddle_ready:
+        print("[ERROR] PaddleOCR is not available. Install paddleocr and paddlepaddle.")
+        return
+    print("[INFO] OCR=PaddleOCR")
 
     prev_pct = None
 
@@ -756,23 +814,16 @@ def run_monitor(interval, exp_digits=0):
             exp_row = band[:, x0:x1]
 
             best_e, best_p = None, None
-            if ocr is not None:
-                r = ocr.recognize_row(band, expected_digits=exp_digits)
-                t = tracker.update(r["exp"], r["pct"])
-                if t["exp"] is not None:
-                    best_e = f"{t['exp']:,}"
-                best_p = (f"{t['pct']:.3f}" if t["pct"] is not None else None)
-            else:
-                for _, mask in preprocess(exp_row):
-                    raw, _ = run_ocr(mask, use_tess)
-                    if not raw: continue
-                    e, p = parse(raw)
-                    sc = (1 if p else 0) + (1 if e else 0)
-                    bs = (1 if best_p else 0) + (1 if best_e else 0)
-                    if sc > bs:
-                        best_e, best_p = e, p
-                    if best_e and best_p:
-                        break
+            for _, mask in preprocess(exp_row):
+                raw, _ = run_ocr(mask, paddle_ready)
+                if not raw: continue
+                e, p = parse(raw)
+                sc = (1 if p else 0) + (1 if e else 0)
+                bs = (1 if best_p else 0) + (1 if best_e else 0)
+                if sc > bs:
+                    best_e, best_p = e, p
+                if best_e and best_p:
+                    break
             ts = _ts()
             if best_p:
                 diff = ""

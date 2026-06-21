@@ -1,39 +1,57 @@
 @echo off
+setlocal
 cd /d "%~dp0"
 echo ============================================
 echo   EXPMonitor  build  (PyInstaller, onedir)
 echo ============================================
 echo.
 
+set "PYTHON=python"
+%PYTHON% --version >nul 2>&1
+if not errorlevel 1 goto python_found
+
+set "PYTHON=py -3"
+%PYTHON% --version >nul 2>&1
+if not errorlevel 1 goto python_found
+
+echo Python was not found. Please install Python 3 and add it to PATH.
+pause
+exit /b 1
+
+:python_found
+set "VENV=.build-venv"
+if not exist "%VENV%\Scripts\python.exe" (
+  echo Creating build virtualenv...
+  %PYTHON% -m venv "%VENV%"
+  if errorlevel 1 ( echo venv failed & pause & exit /b 1 )
+)
+set "VPY=%CD%\%VENV%\Scripts\python.exe"
+set "PIP_USER=false"
+
 echo [1/3] Installing packages...
-pip install pyinstaller PyQt5 pyqtgraph numpy opencv-python mss pywin32 Pillow pytesseract --quiet
+"%VPY%" -m pip install --upgrade pip setuptools wheel --quiet
+if errorlevel 1 ( echo pip bootstrap failed & pause & exit /b 1 )
+"%VPY%" -m pip install ^
+  pyinstaller PyQt5 pyqtgraph mss pywin32 Pillow opencv-contrib-python ^
+  paddleocr==2.10.0 paddlepaddle==2.6.2 ^
+  scikit-image pyclipper lmdb rapidfuzz python-docx beautifulsoup4 ^
+  fonttools fire albumentations albucore Cython ^
+  --quiet
 if errorlevel 1 ( echo pip failed & pause & exit /b 1 )
 
 echo [2/3] Building EXE...
-pyinstaller --noconfirm --onedir --windowed --name "EXPMonitor" ^
-  --add-data "exp_monitor.py;." ^
-  --add-data "exp_template_ocr.py;." ^
-  --add-data "templates;templates" ^
-  --hidden-import win32gui --hidden-import win32con --hidden-import win32ui ^
-  --hidden-import win32api --hidden-import pywintypes ^
-  --hidden-import mss --hidden-import mss.windows ^
-  --hidden-import pyqtgraph --hidden-import numpy --hidden-import cv2 ^
-  --hidden-import pytesseract ^
-  --exclude-module easyocr --exclude-module torch --exclude-module torchvision ^
-  --exclude-module matplotlib --exclude-module tkinter ^
-  exp_monitor_qt.py
+"%VPY%" -m PyInstaller --noconfirm --clean EXPMonitor.spec
 if errorlevel 1 ( echo Build failed & pause & exit /b 1 )
 
 echo [3/3] Cleaning up...
 if exist build rmdir /s /q build
-if exist EXPMonitor.spec del /q EXPMonitor.spec
 
 echo.
 echo ============================================
 echo   Done. Output folder is  dist\EXPMonitor\
 echo   Run the app:  dist\EXPMonitor\EXPMonitor.exe
 echo ============================================
-echo   templates and recognition core are bundled inside.
-echo   (Optional) Tesseract fallback: install Tesseract-OCR and add to PATH.
+echo   PaddleOCR recognition core is bundled inside.
+echo   PaddleOCR models may be downloaded on first run.
 echo.
 pause

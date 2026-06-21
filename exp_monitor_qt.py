@@ -37,8 +37,8 @@ find_fill_boundary  = _mod.find_fill_boundary
 preprocess          = _mod.preprocess
 run_ocr             = _mod.run_ocr
 parse               = _mod.parse
-_setup_tess         = _mod._setup_tess
-_init_easy          = _mod._init_easy
+_setup_paddle       = _mod._setup_paddle
+_init_paddle        = _mod._init_paddle
 set_dpi_awareness   = _mod.set_dpi_awareness
 
 # 設定存檔位置（可寫入）
@@ -51,12 +51,16 @@ def _app_dir():
 _CFG_DIR = _app_dir()
 CONFIG_PATH = os.path.join(_CFG_DIR, 'config.json')
 
-try:
-    from exp_template_ocr import (TemplateOCR, build_mask, _imwrite_u,
-                                  build_user_templates, USER_TEMPLATE_DIR)
-    _HAS_TEMPLATE = True
-except Exception:
-    _HAS_TEMPLATE = False
+def _imwrite_u(path, img):
+    try:
+        ext = os.path.splitext(str(path))[1] or ".png"
+        ok, buf = cv2.imencode(ext, img)
+        if not ok:
+            return False
+        buf.tofile(str(path))
+        return True
+    except Exception:
+        return False
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 主題定義
@@ -381,55 +385,29 @@ class MonitorWorker(QObject):
         super().__init__()
         self.cfg = cfg
         self._running = False
-        self._use_tess = False
-        self._ocr = None
+        self._paddle_ready = False
 
     @pyqtSlot()
     def start_work(self):
         self._running = True
         try:
-            self._ocr = None
-            self._use_tess = False
+            self._paddle_ready = False
             self.status.emit("初始化辨識器…")
 
-            # 1) 優先：模板形狀比對
-            if _HAS_TEMPLATE:
-                try:
-                    o = TemplateOCR()
-                    if o.is_ready():
-                        self._ocr = o
-                        self.status.emit("OCR=Template(形狀比對) 就緒")
-                    else:
-                        self.status.emit(
-                            f"模板未就緒（只載入到 {len(o.templates)} 個；"
-                            f"路徑 {o.template_dir}）")
-                except Exception as e:
-                    self.error_sig.emit(f"模板辨識器載入失敗：{e!r}")
+            try:
+                self._paddle_ready = _setup_paddle()
+            except Exception as e:
+                self.error_sig.emit(f"PaddleOCR 偵測失敗：{e!r}")
+                self._paddle_ready = False
+            if self._paddle_ready:
+                self.status.emit("OCR=PaddleOCR 就緒")
             else:
-                self.status.emit("模板模組未載入（_HAS_TEMPLATE=False）")
-
-            # 2) 退回：Tesseract → EasyOCR（兩者都包了 try，缺了也不會無聲當掉）
-            if self._ocr is None:
-                try:
-                    self._use_tess = _setup_tess()
-                except Exception as e:
-                    self.error_sig.emit(f"Tesseract 偵測失敗：{e!r}")
-                    self._use_tess = False
-                if self._use_tess:
-                    self.status.emit("OCR=Tesseract 就緒")
-                else:
-                    try:
-                        _init_easy()
-                        self.status.emit("OCR=EasyOCR 就緒")
-                    except Exception as e:
-                        self.error_sig.emit(
-                            "找不到可用的 OCR 引擎："
-                            "模板未就緒、未安裝 Tesseract、EasyOCR 也不可用"
-                            f"（{e!r}）。請確認 templates 資料夾有打包進來。")
-                        self._fatal_startup("no_ocr_engine")
-                        self._running = False
-                        self.status.emit("已停止：沒有可用的 OCR 引擎")
-                        return
+                detail = getattr(_mod, "PADDLE_LAST_ERROR", "") or "no_paddle_ocr"
+                self.error_sig.emit(detail)
+                self._fatal_startup(detail)
+                self._running = False
+                self.status.emit("已停止：沒有可用的 PaddleOCR")
+                return
         except Exception as e:
             self._fatal_startup(repr(e))
             self.error_sig.emit(f"啟動失敗：{e!r}")
@@ -476,23 +454,16 @@ class MonitorWorker(QObject):
         x0, x1   = find_exp_text_cols(text_band, img.shape[1])
         row       = text_band[:, x0:x1]
         best_e, best_p = None, None
-        if self._ocr is not None:
-            r = self._ocr.recognize_row(text_band, expected_digits=self.cfg.get("exp_digits", 0))
-            if r["exp"]:
-                best_e = f"{int(r['exp']):,}"
-            if r["pct"]:
-                best_p = r["pct"]
-        else:
-            for _, mask in preprocess(row):
-                raw, _ = run_ocr(mask, self._use_tess)
-                if not raw: continue
-                e, p = parse(raw)
-                sc = (1 if p else 0) + (1 if e else 0)
-                bs = (1 if best_p else 0) + (1 if best_e else 0)
-                if sc > bs:
-                    best_e, best_p = e, p
-                if best_e and best_p:
-                    break
+        for _, mask in preprocess(row):
+            raw, _ = run_ocr(mask, self._paddle_ready)
+            if not raw: continue
+            e, p = parse(raw)
+            sc = (1 if p else 0) + (1 if e else 0)
+            bs = (1 if best_p else 0) + (1 if best_e else 0)
+            if sc > bs:
+                best_e, best_p = e, p
+            if best_e and best_p:
+                break
         ts = datetime.now().strftime("%H:%M:%S")
         if best_p:
             self.reading.emit({"ts": ts, "pct": best_p, "exp": best_e, "cap": cap})
@@ -627,13 +598,27 @@ class SettingsPanel(QFrame):
         lay.addWidget(_lbl("抓取間隔", "gray", 11))
         int_row = QHBoxLayout()
         int_row.setSpacing(6)
+        try:
+            interval_value = float(cfg.get("interval", 1) or 1)
+        except (TypeError, ValueError):
+            interval_value = 1.0
+        cfg["interval"] = max(0.1, interval_value)
+        self._interval_spin = QDoubleSpinBox()
+        self._interval_spin.setRange(0.1, 3600.0)
+        self._interval_spin.setDecimals(1)
+        self._interval_spin.setSingleStep(0.5)
+        self._interval_spin.setSuffix(" s")
+        self._interval_spin.setValue(cfg["interval"])
+        self._interval_spin.setFixedWidth(95)
+        self._interval_spin.valueChanged.connect(self._set_interval)
+        int_row.addWidget(self._interval_spin)
         self._interval_grp = QButtonGroup(self)
         for s in [1, 2, 3, 5, 10, 30]:
             rb = QRadioButton(f"{s}s")
             if s == cfg.get("interval", 1):
                 rb.setChecked(True)
             self._interval_grp.addButton(rb, s)
-            rb.toggled.connect(lambda chk, v=s: cfg.update({"interval": v}) if chk else None)
+            rb.toggled.connect(lambda chk, v=s: self._set_interval(v) if chk else None)
             int_row.addWidget(rb)
         int_row.addStretch()
         int_row.addWidget(_lbl("自訂:", "gray", 12))
@@ -779,6 +764,35 @@ class SettingsPanel(QFrame):
         theme_row.addStretch()
         lay.addLayout(theme_row)
 
+    def _set_interval(self, v):
+        try:
+            value = max(0.1, float(v))
+        except (TypeError, ValueError):
+            return
+        self._cfg["interval"] = value
+        spin = getattr(self, "_interval_spin", None)
+        if spin is not None and abs(spin.value() - value) > 0.001:
+            old = spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(old)
+        grp = getattr(self, "_interval_grp", None)
+        if grp is None:
+            return
+        target = None
+        for btn in grp.buttons():
+            if abs(float(grp.id(btn)) - value) < 0.001:
+                target = btn
+                break
+        if grp.checkedButton() is target:
+            return
+        was_exclusive = grp.exclusive()
+        grp.setExclusive(False)
+        for btn in grp.buttons():
+            old = btn.blockSignals(True)
+            btn.setChecked(btn is target)
+            btn.blockSignals(old)
+        grp.setExclusive(was_exclusive)
+
     def _apply_loweff_thr(self, t):
         try:
             self._cfg["loweff_threshold"] = float(t.replace(",", "").strip() or 0)
@@ -799,9 +813,9 @@ class SettingsPanel(QFrame):
 
     def _apply_custom(self):
         try:
-            v = int(self._cust.text())
-            if v < 1: raise ValueError
-            self._cfg["interval"] = v
+            v = float(self._cust.text())
+            if v <= 0: raise ValueError
+            self._set_interval(v)
             checked = self._interval_grp.checkedButton()
             if checked:
                 self._interval_grp.setExclusive(False)
@@ -901,9 +915,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         set_dpi_awareness()
         self.setWindowTitle("楓之谷 EXP 監控")
-        self.setMinimumWidth(650)
+        self.setMinimumWidth(980)
         self.setMinimumHeight(480)
-        self.resize(650, 720)
+        self.resize(1100, 720)
         self.setStyleSheet(_build_qss())
 
         self._cfg: dict = {"interval": 1, "threshold": 1.0, "chart_max": 28800,
@@ -1030,6 +1044,22 @@ class MainWindow(QMainWindow):
         self._body_lay.addWidget(self._slack_banner)
         self._body_lay.addWidget(self._loweff_banner)
 
+        self._content_grid = QGridLayout()
+        self._content_grid.setContentsMargins(0, 0, 0, 0)
+        self._content_grid.setHorizontalSpacing(10)
+        self._content_grid.setVerticalSpacing(10)
+        self._content_grid.setColumnStretch(0, 3)
+        self._content_grid.setColumnStretch(1, 2)
+        self._content_grid.setRowStretch(2, 1)
+        self._body_lay.addLayout(self._content_grid)
+
+        self._left_widget = QWidget()
+        self._left_widget.setStyleSheet("background:transparent;")
+        self._left_lay = QVBoxLayout(self._left_widget)
+        self._left_lay.setContentsMargins(0, 0, 0, 0)
+        self._left_lay.setSpacing(10)
+        self._content_grid.addWidget(self._left_widget, 0, 0, 3, 1)
+
         # ─── EXP display card（戰鬥力列樣式：最深底色 + 純白大字）──────────
         self._exp_card, exp_lay = _card(16, 14)
         exp_card = self._exp_card  # alias
@@ -1129,7 +1159,7 @@ class MainWindow(QMainWindow):
         _exp_outer = QHBoxLayout(); _exp_outer.setSpacing(10)
         _exp_outer.addWidget(exp_card, 1)
         _exp_outer.addLayout(_btncol)
-        self._body_lay.addLayout(_exp_outer)
+        self._left_lay.addLayout(_exp_outer)
 
         # ─── Stats row ────────────────────────────────────────────────────
         self._stats_widget = QWidget()
@@ -1144,12 +1174,12 @@ class MainWindow(QMainWindow):
         self._tile_pph.setMinimumHeight(85)
         stats_lay.addWidget(self._tile_eps)
         stats_lay.addWidget(self._tile_pph)
-        self._body_lay.addWidget(self._stats_widget)
+        self._left_lay.addWidget(self._stats_widget)
 
         # ─── TTL tile ─────────────────────────────────────────────────────
         self._ttl_widget = StatTile("⏱  預計升等時間", "依 %/hr 計算", 44)
         self._ttl_widget.setMinimumHeight(105)
-        self._body_lay.addWidget(self._ttl_widget)
+        self._left_lay.addWidget(self._ttl_widget)
 
         # ─── 偷懶偵測 card ─────────────────────────────────────────────────
         self._slack_card, slack_lay = _card(16, 14)
@@ -1189,7 +1219,7 @@ class MainWindow(QMainWindow):
         slack_lay.addWidget(hint)
         self._slack_status = _lbl("未啟用", "gray", 12, mono=True)
         slack_lay.addWidget(self._slack_status)
-        self._body_lay.addWidget(self._slack_card)
+        self._left_lay.addWidget(self._slack_card)
 
         # ─── Chart ────────────────────────────────────────────────────────
         ax_pen = pg.mkPen(C["chart_text"])
@@ -1212,7 +1242,7 @@ class MainWindow(QMainWindow):
             symbolBrush=pg.mkBrush(C["cyan"]),
             symbolSize=4, symbol="o")
         cpct_lay.addWidget(self._plot)
-        self._body_lay.addWidget(self._chart_pct_widget)
+        self._content_grid.addWidget(self._chart_pct_widget, 0, 1)
 
         # 圖表 2：EXP/s 歷史（近60秒平均，每秒採樣）
         self._chart_eps_widget, ceps_lay = _card(12, 10)
@@ -1230,7 +1260,7 @@ class MainWindow(QMainWindow):
         self._curve_eps = self._plot_eps.plot(
             pen=pg.mkPen(C["green"], width=2))
         ceps_lay.addWidget(self._plot_eps)
-        self._body_lay.addWidget(self._chart_eps_widget)
+        self._content_grid.addWidget(self._chart_eps_widget, 1, 1)
 
         # ─── Controls ─────────────────────────────────────────────────────
         ctrl_row = QHBoxLayout()
@@ -1249,9 +1279,9 @@ class MainWindow(QMainWindow):
         btn_diag.setToolTip("擷取目前畫面與辨識結果，存到使用者資料夾供回報")
         btn_diag.clicked.connect(self._debug_capture)
 
-        btn_calib = QPushButton("🎯 校準辨識")
+        btn_calib = QPushButton("🎯 校準已停用")
         btn_calib.setFixedHeight(38)
-        btn_calib.setToolTip("一次性校準：用你自己遊戲畫面建立辨識模板（換客戶端/字體時用）")
+        btn_calib.setToolTip("目前強制使用 PaddleOCR，不再使用模板校準")
         btn_calib.clicked.connect(self._calibrate)
 
 
@@ -1260,15 +1290,15 @@ class MainWindow(QMainWindow):
         ctrl_row.addWidget(btn_diag)
         ctrl_row.addWidget(btn_calib)
         ctrl_row.addStretch()
-        self._body_lay.addLayout(ctrl_row)
+        self._left_lay.addLayout(ctrl_row)
 
         # ─── Log ──────────────────────────────────────────────────────────
         self._log_widget = QTextEdit()
         self._log_widget.setReadOnly(True)
         self._log_widget.setFixedHeight(180)
-        self._body_lay.addWidget(self._log_widget)
+        self._left_lay.addWidget(self._log_widget)
 
-        self._body_lay.addStretch()
+        self._left_lay.addStretch()
         self._apply_vis()
 
     # ── Settings toggle ───────────────────────────────────────────────────────
@@ -1337,8 +1367,6 @@ class MainWindow(QMainWindow):
     # ── 診斷擷取（給用 exe、沒有 Python 的人回報問題用）──────────────────────────
     def _debug_capture(self):
         import json, datetime, traceback
-        if not _HAS_TEMPLATE:
-            self._log_err("模板模組未載入，無法診斷擷取"); return
         try:
             out = os.path.join(_CFG_DIR, "EXPMonitor_debug")
             os.makedirs(out, exist_ok=True)
@@ -1366,15 +1394,36 @@ class MainWindow(QMainWindow):
             y0, y1 = find_exp_bar_rows(img)
             band = img[y0:y1, :]
             _imwrite_u(os.path.join(out, f"{ts}_band.png"), band)
-            ocr = (self._worker._ocr if (self._worker and getattr(self._worker, "_ocr", None))
-                   else TemplateOCR())
-            mask = build_mask(band)
-            _imwrite_u(os.path.join(out, f"{ts}_mask.png"), mask)
-            try:
-                _imwrite_u(os.path.join(out, f"{ts}_block.png"), ocr._isolate_text(mask))
-            except Exception:
-                pass
-            r = ocr.recognize(mask, debug=True)
+            x0, x1 = find_exp_text_cols(band, img.shape[1])
+            row = band[:, x0:x1]
+            _imwrite_u(os.path.join(out, f"{ts}_row.png"), row)
+            paddle_ready = _setup_paddle()
+            best_e, best_p, best_raw = None, None, ""
+            ocr_results = []
+            if paddle_ready:
+                for name, mask in preprocess(row):
+                    _imwrite_u(os.path.join(out, f"{ts}_mask_{name}.png"), mask)
+                    raw, engine = run_ocr(mask, paddle_ready)
+                    e, p = parse(raw)
+                    ocr_results.append({
+                        "name": name,
+                        "engine": engine,
+                        "raw": raw,
+                        "exp": e,
+                        "pct": p,
+                    })
+                    sc = (1 if p else 0) + (1 if e else 0)
+                    bs = (1 if best_p else 0) + (1 if best_e else 0)
+                    if sc > bs:
+                        best_e, best_p, best_raw = e, p, raw
+                    if best_e and best_p:
+                        break
+            r = {
+                "exp": best_e,
+                "pct": best_p,
+                "raw": best_raw,
+                "reason": "ok" if best_p else ("paddle_unavailable" if not paddle_ready else "parse_fail"),
+            }
             # 額外幾何資訊（判斷 DPI/座標是否錯位）
             geo = {}
             try:
@@ -1401,11 +1450,12 @@ class MainWindow(QMainWindow):
                 "cap_method": cap,
                 "strip_shape": list(img.shape),
                 "exp_rows": f"{y0}-{y1}",
+                "exp_cols": f"{x0}-{x1}",
                 "exp": r.get("exp"), "pct": r.get("pct"),
-                "conf": round(r.get("conf", 0), 3), "reason": r.get("reason"),
-                "n_runs": r.get("n_runs"), "widths": r.get("widths"),
-                "templates_ready": ocr.is_ready(),
-                "template_dir": str(ocr.template_dir),
+                "raw": r.get("raw"),
+                "reason": r.get("reason"),
+                "paddle_ready": paddle_ready,
+                "ocr_results": ocr_results,
                 "mss": mss_stats,
             }
             with open(os.path.join(out, f"{ts}_info.txt"), "w", encoding="utf-8") as f:
@@ -1422,8 +1472,14 @@ class MainWindow(QMainWindow):
             self._log_err(traceback.format_exc())
 
     def _calibrate(self):
+        QMessageBox.information(
+            self,
+            "校準已停用",
+            "目前已強制使用 PaddleOCR，不再使用模板校準。若辨識不穩，請改用「診斷擷取」回報裁切與 OCR 結果。",
+        )
+        return
         """一次性校準：抓現在的經驗列，請使用者輸入畫面上看到的數字，建立該客戶端字形的模板。"""
-        if not _HAS_TEMPLATE:
+        if False:
             QMessageBox.warning(self, "校準", "辨識模組未載入，無法校準。"); return
         hwnd, reg = find_window()
         if hwnd is None:
@@ -1435,7 +1491,7 @@ class MainWindow(QMainWindow):
         band = img[y0:y1, :]
         # 裁切到文字區塊讓預覽看得清楚
         try:
-            mk = build_mask(band)
+            mk = np.zeros((1, 1), dtype=np.uint8)
             cc = (mk > 0).sum(axis=0)
             import numpy as _np
             on = _np.where(cc > 16)[0]
@@ -1473,7 +1529,7 @@ class MainWindow(QMainWindow):
         if dlg.exec_() != QDialog.Accepted:
             return
         try:
-            ok, msg = build_user_templates(band, exp_in.text(), pct_in.text())
+            ok, msg = False, "PaddleOCR mode does not use template calibration"
         except Exception as e:
             QMessageBox.critical(self, "校準失敗", repr(e)); return
         (QMessageBox.information if ok else QMessageBox.warning)(self, "校準結果", msg)
@@ -1481,7 +1537,7 @@ class MainWindow(QMainWindow):
         # 立即套用：重載辨識器，讓 worker 下一幀就用新模板
         try:
             if self._worker is not None and getattr(self._worker, "_ocr", None) is not None:
-                self._worker._ocr = TemplateOCR()   # 會優先載入使用者模板
+                pass
         except Exception:
             pass
 
@@ -2045,7 +2101,39 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
+def _run_ocr_smoke():
+    import traceback
+
+    log_path = os.path.join(_CFG_DIR, "EXPMonitor_ocr_smoke.log")
+    try:
+        ok = _setup_paddle()
+        img = np.ones((80, 760), dtype=np.uint8) * 255
+        cv2.putText(img, "177,960,562,689,528 [45.430%]",
+                    (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 1.3, 0, 3, cv2.LINE_AA)
+        raw, engine = run_ocr(img, ok)
+        exp, pct = parse(raw)
+        success = bool(ok and exp and pct)
+        body = (
+            f"ok={success}\n"
+            f"engine={engine}\n"
+            f"raw={raw!r}\n"
+            f"exp={exp}\n"
+            f"pct={pct}\n"
+            f"paddle_error={getattr(_mod, 'PADDLE_LAST_ERROR', '')}\n"
+        )
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(body)
+        return 0 if success else 2
+    except Exception:
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(traceback.format_exc())
+        return 1
+
+
 if __name__ == "__main__":
+    if "--ocr-smoke" in sys.argv:
+        sys.exit(_run_ocr_smoke())
+
     # ── DPI 感知必須在 QApplication 之前設定 ──────────────────────────────
     # 否則 GetClientRect/ClientToScreen 會回傳「邏輯像素」(被縮放虛擬化),
     # 與 mss 抓的「物理像素」對不上 → 算出的視窗底部偏高 → EXP 條被切掉。
