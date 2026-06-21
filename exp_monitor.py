@@ -665,6 +665,18 @@ def _pct(s):
     return None
 
 
+def _pct_from_bracket_tail(token):
+    compact = re.sub(r'\s+', '', token).strip('[]')
+    attempts = [compact]
+    if compact.startswith('1'):
+        attempts.extend(compact[i:] for i in (1, 2) if len(compact) > i)
+    for candidate in attempts:
+        p = _pct(candidate)
+        if p is not None:
+            return p
+    return None
+
+
 def _exp(left):
     words = left.split()
     for w in reversed(words):
@@ -688,7 +700,7 @@ def _exp(left):
 
 def parse(raw):
     if not raw: return None, None
-    text = ''.join(OCR_FIXES.get(c,c) for c in raw)
+    text = raw.translate(OCR_FIXES)
 
     # ── 精確模式：找 [XX.XXX%] ───────────────────────────────────────────────
     for bm in re.finditer(r'\[\s*([\d.,]{3,8})\s*%?\s*\]', text):
@@ -696,17 +708,18 @@ def parse(raw):
         if p is None: continue
         return _exp(text[:bm.start()].strip()), p
 
-    # ── 半精確：[  被讀成 1 或 11（豎線/填充邊界 artifact）──────────────────
-    # 找 1{1,2}XX.XXX%] 或 直接找 XX.XXX%] 格式
-    for bm in re.finditer(r'1{0,2}\s*([\d.,]{3,8})\s*%\s*\]', text):
-        p = _pct(bm.group(1))
+    # ── 半精確：[ 被讀成 1，但保留真實百分比開頭的 1 ────────────────────────
+    # 例如 [11.4%] 可能 OCR 成 111.4%]；先抓完整 token，再只在 >100 時剝掉
+    # 最左側的 bracket artifact，避免把 11.4 誤解析成 1.4。
+    for bm in re.finditer(r'(?<![\d.,])([1\[]?\s*[\d.,]{3,8})\s*%\s*\]', text):
+        p = _pct_from_bracket_tail(bm.group(1))
         if p is None: continue
         # EXP 在此 match 之前
         return _exp(text[:bm.start()].strip()), p
 
     # ── 寬鬆：找緊接 % 的小數（不管有無括號）────────────────────────────────
-    # 從右往左找第一個 XX.XXX% 格式（EXP% 必在文字末段）
-    for m in reversed(list(re.finditer(r'(\d{1,2}[.,]\d{3})\s*%', text))):
+    # 從右往左找第一個 XX.X% / XX.XXX% 格式（EXP% 必在文字末段）
+    for m in reversed(list(re.finditer(r'(\d{1,3}[.,]\d{1,3})\s*%', text))):
         p = _pct(m.group(1))
         if p is None: continue
         try:
