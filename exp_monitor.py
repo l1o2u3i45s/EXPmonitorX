@@ -65,7 +65,7 @@ OCR_WHITELIST = "0123456789,.[]%"
 OCR_FIXES = str.maketrans({
     'O':'0','o':'0','l':'1','I':'1','|':'1',
     'S':'5','s':'5','B':'8','Z':'2','z':'2',
-    'G':'6','g':'9','q':'9','\n':'','\r':'',
+    'G':'6','g':'9','q':'9','/':'7','\n':'','\r':'',
 })
 
 
@@ -670,16 +670,107 @@ def _pct(s):
     return None
 
 
-def _pct_from_bracket_tail(token):
-    compact = re.sub(r'\s+', '', token).strip('[]')
-    attempts = [compact]
-    if compact.startswith('1'):
-        attempts.extend(compact[i:] for i in (1, 2) if len(compact) > i)
-    for candidate in attempts:
-        p = _pct(candidate)
-        if p is not None:
-            return p
+def _append_unique_pct(values, pct):
+    if pct is not None and pct not in values:
+        values.append(pct)
+
+
+def _pct_from_fixed_decimal_digits(digits):
+    if len(digits) < 4:
+        return None
+    int_part = digits[:-3]
+    dec_part = digits[-3:]
+    if not int_part or len(int_part) > 3:
+        return None
+    try:
+        value = float(f"{int_part}.{dec_part}")
+        if 0.0 <= value <= 100.0:
+            return f"{int_part}.{dec_part}"
+    except Exception:
+        pass
     return None
+
+
+def _pct_tail_candidates(token):
+    compact = re.sub(r'\s+', '', token).strip('[]').replace(',', '.')
+    compact = re.sub(r'^[^\d.]+|[^\d.]+$', '', compact)
+    if not compact:
+        return []
+
+    leading = [0]
+    if compact.startswith('1'):
+        leading.append(1)
+        if len(compact) > 1 and compact.startswith('11'):
+            leading.append(2)
+
+    values = []
+    for left_trim in leading:
+        candidate = compact[left_trim:]
+        if not candidate:
+            continue
+        if '.' in candidate:
+            _append_unique_pct(values, _pct(candidate))
+        else:
+            _append_unique_pct(values, _pct_from_fixed_decimal_digits(candidate))
+            if candidate.endswith('1'):
+                _append_unique_pct(values, _pct_from_fixed_decimal_digits(candidate[:-1]))
+    return values
+
+
+def _choose_pct_candidate(candidates, reference_pct=None, max_pct_delta=None):
+    if not candidates:
+        return None
+    if reference_pct is None:
+        return candidates[0]
+    try:
+        ref = float(reference_pct)
+    except Exception:
+        return candidates[0]
+
+    allowed = 1.0 if max_pct_delta is None else max(0.02, float(max_pct_delta))
+    scored = []
+    for pct in candidates:
+        try:
+            value = float(pct)
+        except Exception:
+            continue
+        if ref > 90.0 and value < 5.0:
+            scored.append((0.0, pct))
+            continue
+        delta = value - ref
+        if -0.02 <= delta <= allowed:
+            scored.append((abs(delta), pct))
+    if scored:
+        scored.sort(key=lambda item: item[0])
+        return scored[0][1]
+    return None
+
+
+def _pct_from_bracket_tail(token, reference_pct=None, max_pct_delta=None):
+    return _choose_pct_candidate(
+        _pct_tail_candidates(token),
+        reference_pct=reference_pct,
+        max_pct_delta=max_pct_delta,
+    )
+
+
+def _iter_percent_tail_matches(text):
+    markers = list(re.finditer(r'(?:%\s*[1\]Jj]?|\])', text))
+    for marker in reversed(markers):
+        before = text[:marker.start()]
+        for pattern in (
+            r'(\d{1,3}[.,]\d{1,4})\s*$',
+            r'(\d{1,3}\s+\d{3,4})\s*$',
+        ):
+            m = re.search(pattern, before)
+            if m:
+                yield m, marker
+                break
+        else:
+            for length in (6, 5, 7):
+                m = re.search(rf'(\d{{{length}}})\s*$', before)
+                if m:
+                    yield m, marker
 
 
 def _exp(left):
@@ -715,7 +806,7 @@ def _parse_result(raw):
     }
 
 
-def parse_detail(raw):
+def parse_detail(raw, reference_pct=None, max_pct_delta=None):
     detail = _parse_result(raw)
     if not raw:
         detail["reason"] = "ocr_empty"
@@ -727,8 +818,8 @@ def parse_detail(raw):
         detail["reason"] = "normalized_empty"
         return detail
 
-    # ── 精確模式：找 [XX.XXX%] ───────────────────────────────────────────────
-    for bm in re.finditer(r'\[\s*([\d.,]{3,8})\s*%?\s*\]', text):
+    # ── 精確模式：找 [XX.XXX%]；OCR 偶爾把 % 讀成 : / ; ──────────────────────
+    for bm in re.finditer(r'\[\s*([\d.,]{3,8})\s*[%:;]?\s*\]', text):
         p = _pct(bm.group(1))
         detail["candidates"].append({
             "mode": "bracket",
@@ -748,7 +839,11 @@ def parse_detail(raw):
     # 例如 [11.4%] 可能 OCR 成 111.4%]；先抓完整 token，再只在 >100 時剝掉
     # 最左側的 bracket artifact，避免把 11.4 誤解析成 1.4。
     for bm in re.finditer(r'(?<![\d.,])([1\[]?\s*[\d.,]{3,8})\s*%\s*\]', text):
-        p = _pct_from_bracket_tail(bm.group(1))
+        p = _pct_from_bracket_tail(
+            bm.group(1),
+            reference_pct=reference_pct,
+            max_pct_delta=max_pct_delta,
+        )
         detail["candidates"].append({
             "mode": "bracket_tail",
             "token": bm.group(1),
@@ -784,6 +879,89 @@ def parse_detail(raw):
                     "exp": _exp(text[:m.start()].strip()),
                     "pct": p,
                     "mode": "loose_percent",
+                    "reason": "ok",
+                })
+                return detail
+            candidate["accepted"] = False
+            candidate["reject_reason"] = "outside_monitor_range"
+        except Exception as e:
+            candidate["accepted"] = False
+            candidate["reject_reason"] = repr(e)
+        detail["candidates"].append(candidate)
+
+    # ── 尾端 marker recovery：例如 [12.129%] 被讀成 112 129%1 ───────────────
+    for m, marker in _iter_percent_tail_matches(text):
+        exp = _exp(text[:m.start()].strip())
+        pct_options = _pct_tail_candidates(m.group(1))
+        p = _choose_pct_candidate(
+            pct_options,
+            reference_pct=reference_pct,
+            max_pct_delta=max_pct_delta,
+        )
+        candidate = {
+            "mode": "tail_percent_marker",
+            "token": m.group(1),
+            "pct": p,
+            "pct_options": pct_options,
+            "exp": exp,
+            "marker": marker.group(0),
+        }
+        if exp is None:
+            candidate["accepted"] = False
+            candidate["reject_reason"] = "missing_exp"
+            detail["candidates"].append(candidate)
+            continue
+        if p is None:
+            candidate["accepted"] = False
+            candidate["reject_reason"] = "outside_reference_range"
+            detail["candidates"].append(candidate)
+            continue
+        candidate["accepted"] = True
+        detail["candidates"].append(candidate)
+        detail.update({
+            "exp": exp,
+            "pct": p,
+            "mode": "tail_percent_marker",
+            "reason": "ok",
+        })
+        return detail
+
+    # ── OCR recovery：Paddle 偶爾會把 [12.156%] 讀成 112.1561 ────────────────
+    # 只有在左半段能解析成 EXP 大數字時才接受，避免把一般小數誤當百分比。
+    for m in reversed(list(re.finditer(
+        r'(?<![\d.,])([1\[]?\d{1,3}[.,]\d{1,4}1?)(?![\d.,])\s*$',
+        text,
+    ))):
+        exp = _exp(text[:m.start()].strip())
+        pct_options = _pct_tail_candidates(m.group(1))
+        p = _choose_pct_candidate(
+            pct_options,
+            reference_pct=reference_pct,
+            max_pct_delta=max_pct_delta,
+        )
+        candidate = {
+            "mode": "tail_percent_no_marker",
+            "token": m.group(1),
+            "pct": p,
+            "pct_options": pct_options,
+            "exp": exp,
+        }
+        if exp is None:
+            candidate["accepted"] = False
+            candidate["reject_reason"] = "missing_exp"
+            detail["candidates"].append(candidate)
+            continue
+        if p is None:
+            detail["candidates"].append(candidate)
+            continue
+        try:
+            if 1.0 <= float(p) <= 99.999:
+                candidate["accepted"] = True
+                detail["candidates"].append(candidate)
+                detail.update({
+                    "exp": exp,
+                    "pct": p,
+                    "mode": "tail_percent_no_marker",
                     "reason": "ok",
                 })
                 return detail

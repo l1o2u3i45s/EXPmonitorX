@@ -323,7 +323,7 @@ class RateTracker:
         self._eps_buf.clear()
         self._pph_buf.clear()
 
-    def add(self, exp_int: int, pct: float):
+    def add(self, exp_int: int | None, pct: float):
         now = time.time()
         self._all.append((now, exp_int, pct))
         self._eps_buf.append((now, exp_int, pct))
@@ -340,7 +340,15 @@ class RateTracker:
         t0, e0, p0 = buf[0]; t1, e1, p1 = buf[-1]
         dt = t1 - t0
         if dt <= 0: return None, None
-        return (e1 - e0) / dt, (p1 - p0) / dt * 3600
+        exp_rate = None
+        exp_pts = [(t, e) for t, e, _ in buf if e is not None]
+        if len(exp_pts) >= 2:
+            et0, ee0 = exp_pts[0]
+            et1, ee1 = exp_pts[-1]
+            edt = et1 - et0
+            if edt > 0:
+                exp_rate = (ee1 - ee0) / edt
+        return exp_rate, (p1 - p0) / dt * 3600
 
     @property
     def exp_per_sec(self) -> float | None:
@@ -400,6 +408,8 @@ class MonitorWorker(QObject):
         self.cfg = cfg
         self._running = False
         self._paddle_ready = False
+        self._last_pct = None
+        self._last_pct_ts = None
 
     @pyqtSlot()
     def start_work(self):
@@ -445,6 +455,19 @@ class MonitorWorker(QObject):
 
     def stop(self): self._running = False
 
+    def _pct_is_plausible(self, pct, ref_pct, max_pct_delta):
+        if pct is None or ref_pct is None:
+            return True
+        try:
+            value = float(pct)
+            ref = float(ref_pct)
+        except Exception:
+            return True
+        if ref > 90.0 and value < 5.0:
+            return True
+        allowed = 1.0 if max_pct_delta is None else max(0.02, float(max_pct_delta))
+        return -0.02 <= value - ref <= allowed
+
     def _loop(self):
         while self._running:
             try:
@@ -469,15 +492,34 @@ class MonitorWorker(QObject):
         row       = text_band[:, x0:x1]
         best_e, best_p = None, None
         failures = []
+        ref_pct = self._last_pct
+        max_pct_delta = None
+        if ref_pct is not None and self._last_pct_ts is not None:
+            elapsed = max(0.0, time.time() - self._last_pct_ts)
+            max_pct_delta = min(2.0, max(0.05, elapsed * 0.1 + 0.02))
         for name, mask in preprocess(row):
             raw, engine = run_ocr(mask, self._paddle_ready)
-            detail = parse_detail(raw)
+            detail = parse_detail(
+                raw,
+                reference_pct=ref_pct,
+                max_pct_delta=max_pct_delta,
+            )
             detail["name"] = name
             detail["engine"] = engine
             if not raw and getattr(_mod, "OCR_LAST_ERROR", ""):
                 detail["ocr_error"] = getattr(_mod, "OCR_LAST_ERROR", "")
             failures.append(detail)
             e, p = detail["exp"], detail["pct"]
+            if p and not self._pct_is_plausible(p, ref_pct, max_pct_delta):
+                detail["exp"] = e
+                detail["pct"] = None
+                detail["reason"] = "pct_out_of_monitor_range"
+                detail["temporal_reject"] = {
+                    "reference_pct": ref_pct,
+                    "max_delta": max_pct_delta,
+                    "actual_delta": float(p) - float(ref_pct),
+                }
+                p = None
             sc = (1 if p else 0) + (1 if e else 0)
             bs = (1 if best_p else 0) + (1 if best_e else 0)
             if sc > bs:
@@ -486,6 +528,11 @@ class MonitorWorker(QObject):
                 break
         ts = datetime.now().strftime("%H:%M:%S")
         if best_p:
+            try:
+                self._last_pct = float(best_p)
+                self._last_pct_ts = time.time()
+            except Exception:
+                pass
             self.reading.emit({"ts": ts, "pct": best_p, "exp": best_e, "cap": cap})
         else:
             self.ocr_fail.emit(_format_ocr_failure(ts, cap, failures))
@@ -1853,7 +1900,9 @@ class MainWindow(QMainWindow):
         ok3, reason3  = self._guard.check(exp)
         self._update_digit_lbl(locked_before)
 
-        valid  = ok1 and ok2 and ok3
+        exp_ok = ok1 and ok2 and ok3
+        # Percent is the authoritative reading; EXP checks only gate EXP display/stats.
+        valid  = True
         reason = reason1 or reason2 or reason3
 
         if valid:
@@ -1868,34 +1917,35 @@ class MainWindow(QMainWindow):
                 f"color:{C['white_hero']}; font-size:44px; font-weight:700;"
                 f" font-family:Consolas; background:transparent;")
             self._pct_bar.setValue(int(pct_f * 100))
-            self._exp_lbl.setText(exp or "—")
+            self._exp_lbl.setText(exp if exp_ok and exp else "—")
             self._set_status("監控中", C["green"])
 
-            if exp_int is not None:
-                self._rate.add(exp_int, pct_f)
+            exp_for_stats = exp_int if exp_ok else None
+            self._rate.add(exp_for_stats, pct_f)
+            if exp_for_stats is not None:
                 # 用通過驗證的 cur_max 更新基準（EMA）
                 if cur_max is not None:
                     if self._max_exp_est is None:
                         self._max_exp_est = cur_max
                     else:
                         self._max_exp_est = self._max_exp_est * 0.9 + cur_max * 0.1
-                self._update_stats(pct_f)
-                self._check_slack(exp_int, ts)
+                self._check_slack(exp_for_stats, ts)
+            self._update_stats(pct_f)
 
             diff_str = ""
             if self._prev_pct is not None:
                 diff_str = f"  ({pct_f - self._prev_pct:+.3f}%)"
 
             line = f"[{ts}]  {pct}%"
-            if exp:     line += f"  {exp}"
+            if exp_ok and exp: line += f"  {exp}"
             if diff_str: line += diff_str
             line += f"  [{cap}]"
             self._log_colored(line, C["green"])
 
             self._update_session(pct_f)
             self._prev_pct = pct_f
-            if exp_int is not None:
-                self._prev_exp_int = exp_int
+            if exp_for_stats is not None:
+                self._prev_exp_int = exp_for_stats
         else:
             self._pct_lbl.setStyleSheet(
                 f"color:{C['accent']}; font-size:44px; font-weight:700;"
@@ -1932,10 +1982,14 @@ class MainWindow(QMainWindow):
             self._tile_eps.set_value(
                 f"{eps:,.0f}" if eps >= 0 else "—",
                 C["cyan"] if eps >= 0 else C["red"])
+        else:
+            self._tile_eps.set_value("—")
         if pph is not None:
             self._tile_pph.set_value(
                 f"{pph:.3f}",
                 C["cyan"] if pph >= 0 else C["red"])
+        else:
+            self._tile_pph.set_value("—")
         self._ttl_widget.set_value(ttl, C["cyan"])
         self._check_loweff()
 
