@@ -37,6 +37,8 @@ find_fill_boundary  = _mod.find_fill_boundary
 preprocess          = _mod.preprocess
 run_ocr             = _mod.run_ocr
 parse               = _mod.parse
+parse_detail        = _mod.parse_detail
+format_parse_failure = _mod.format_parse_failure
 _setup_paddle       = _mod._setup_paddle
 _init_paddle        = _mod._init_paddle
 set_dpi_awareness   = _mod.set_dpi_awareness
@@ -61,6 +63,18 @@ def _imwrite_u(path, img):
         return True
     except Exception:
         return False
+
+
+def _format_ocr_failure(ts, cap, details):
+    if not details:
+        return f"[{ts}] OCR/解析失敗 [{cap}]：沒有前處理結果"
+    parts = []
+    for item in details[:3]:
+        name = item.get("name", "?")
+        parts.append(f"{name}: {format_parse_failure(item)}")
+    if len(details) > 3:
+        parts.append(f"+{len(details) - 3} more")
+    return f"[{ts}] OCR/解析失敗 [{cap}]：" + " | ".join(parts)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 主題定義
@@ -454,10 +468,16 @@ class MonitorWorker(QObject):
         x0, x1   = find_exp_text_cols(text_band, img.shape[1])
         row       = text_band[:, x0:x1]
         best_e, best_p = None, None
-        for _, mask in preprocess(row):
-            raw, _ = run_ocr(mask, self._paddle_ready)
-            if not raw: continue
-            e, p = parse(raw)
+        failures = []
+        for name, mask in preprocess(row):
+            raw, engine = run_ocr(mask, self._paddle_ready)
+            detail = parse_detail(raw)
+            detail["name"] = name
+            detail["engine"] = engine
+            if not raw and getattr(_mod, "OCR_LAST_ERROR", ""):
+                detail["ocr_error"] = getattr(_mod, "OCR_LAST_ERROR", "")
+            failures.append(detail)
+            e, p = detail["exp"], detail["pct"]
             sc = (1 if p else 0) + (1 if e else 0)
             bs = (1 if best_p else 0) + (1 if best_e else 0)
             if sc > bs:
@@ -468,7 +488,7 @@ class MonitorWorker(QObject):
         if best_p:
             self.reading.emit({"ts": ts, "pct": best_p, "exp": best_e, "cap": cap})
         else:
-            self.ocr_fail.emit(ts)
+            self.ocr_fail.emit(_format_ocr_failure(ts, cap, failures))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1404,13 +1424,23 @@ class MainWindow(QMainWindow):
                 for name, mask in preprocess(row):
                     _imwrite_u(os.path.join(out, f"{ts}_mask_{name}.png"), mask)
                     raw, engine = run_ocr(mask, paddle_ready)
-                    e, p = parse(raw)
+                    detail = parse_detail(raw)
+                    detail["name"] = name
+                    detail["engine"] = engine
+                    if not raw and getattr(_mod, "OCR_LAST_ERROR", ""):
+                        detail["ocr_error"] = getattr(_mod, "OCR_LAST_ERROR", "")
+                    e, p = detail["exp"], detail["pct"]
                     ocr_results.append({
                         "name": name,
                         "engine": engine,
                         "raw": raw,
+                        "normalized": detail.get("normalized"),
                         "exp": e,
                         "pct": p,
+                        "reason": detail.get("reason"),
+                        "reason_text": format_parse_failure(detail),
+                        "candidates": detail.get("candidates"),
+                        "ocr_error": detail.get("ocr_error"),
                     })
                     sc = (1 if p else 0) + (1 if e else 0)
                     bs = (1 if best_p else 0) + (1 if best_e else 0)
@@ -1422,7 +1452,11 @@ class MainWindow(QMainWindow):
                 "exp": best_e,
                 "pct": best_p,
                 "raw": best_raw,
-                "reason": "ok" if best_p else ("paddle_unavailable" if not paddle_ready else "parse_fail"),
+                "reason": (
+                    "ok" if best_p else
+                    ("paddle_unavailable" if not paddle_ready else
+                     (ocr_results[0].get("reason_text") if ocr_results else "no_ocr_result"))
+                ),
             }
             # 額外幾何資訊（判斷 DPI/座標是否錯位）
             geo = {}
@@ -1692,7 +1726,7 @@ class MainWindow(QMainWindow):
         self._worker.reading.connect(self._on_reading)
         self._worker.no_window.connect(lambda: self._log_warn("找不到 MapleStory 視窗"))
         self._worker.cap_fail.connect(lambda m: self._log_err(f"截圖失敗：{m}"))
-        self._worker.ocr_fail.connect(lambda ts: self._log_warn(f"[{ts}] OCR 無結果"))
+        self._worker.ocr_fail.connect(lambda m: self._log_colored(m, C["yellow"]))
         self._worker.status.connect(self._log_info)
         self._worker.error_sig.connect(self._log_err)
         self._worker.error_sig.connect(
@@ -2111,14 +2145,19 @@ def _run_ocr_smoke():
         cv2.putText(img, "177,960,562,689,528 [45.430%]",
                     (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 1.3, 0, 3, cv2.LINE_AA)
         raw, engine = run_ocr(img, ok)
-        exp, pct = parse(raw)
+        detail = parse_detail(raw)
+        if not raw and getattr(_mod, "OCR_LAST_ERROR", ""):
+            detail["ocr_error"] = getattr(_mod, "OCR_LAST_ERROR", "")
+        exp, pct = detail["exp"], detail["pct"]
         success = bool(ok and exp and pct)
         body = (
             f"ok={success}\n"
             f"engine={engine}\n"
             f"raw={raw!r}\n"
+            f"normalized={detail.get('normalized')!r}\n"
             f"exp={exp}\n"
             f"pct={pct}\n"
+            f"parse_reason={format_parse_failure(detail)}\n"
             f"paddle_error={getattr(_mod, 'PADDLE_LAST_ERROR', '')}\n"
         )
         with open(log_path, "w", encoding="utf-8") as f:

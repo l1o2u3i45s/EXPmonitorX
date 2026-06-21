@@ -480,6 +480,7 @@ def preprocess(row_bgr):
 
 _paddle_reader = None
 PADDLE_LAST_ERROR = ""
+OCR_LAST_ERROR = ""
 
 
 def _init_paddle():
@@ -614,13 +615,17 @@ def _ocr_legacy_secondary(mask):
 
 
 def run_ocr(mask, _engine_ready=None):
+    global OCR_LAST_ERROR
+    OCR_LAST_ERROR = ""
+    errors = []
     for candidate in (mask, cv2.bitwise_not(mask)):
         try:
             text = _ocr_paddle(candidate)
             if text:
                 return text, "Paddle"
-        except Exception:
-            pass
+        except Exception as e:
+            errors.append(repr(e))
+    OCR_LAST_ERROR = " | ".join(errors)
     return "", "Paddle"
 
 
@@ -698,34 +703,169 @@ def _exp(left):
     return None
 
 
-def parse(raw):
-    if not raw: return None, None
+def _parse_result(raw):
+    return {
+        "raw": raw or "",
+        "normalized": "",
+        "exp": None,
+        "pct": None,
+        "mode": None,
+        "reason": None,
+        "candidates": [],
+    }
+
+
+def parse_detail(raw):
+    detail = _parse_result(raw)
+    if not raw:
+        detail["reason"] = "ocr_empty"
+        return detail
+
     text = raw.translate(OCR_FIXES)
+    detail["normalized"] = text
+    if not text.strip():
+        detail["reason"] = "normalized_empty"
+        return detail
 
     # ── 精確模式：找 [XX.XXX%] ───────────────────────────────────────────────
     for bm in re.finditer(r'\[\s*([\d.,]{3,8})\s*%?\s*\]', text):
         p = _pct(bm.group(1))
+        detail["candidates"].append({
+            "mode": "bracket",
+            "token": bm.group(1),
+            "pct": p,
+        })
         if p is None: continue
-        return _exp(text[:bm.start()].strip()), p
+        detail.update({
+            "exp": _exp(text[:bm.start()].strip()),
+            "pct": p,
+            "mode": "bracket",
+            "reason": "ok",
+        })
+        return detail
 
     # ── 半精確：[ 被讀成 1，但保留真實百分比開頭的 1 ────────────────────────
     # 例如 [11.4%] 可能 OCR 成 111.4%]；先抓完整 token，再只在 >100 時剝掉
     # 最左側的 bracket artifact，避免把 11.4 誤解析成 1.4。
     for bm in re.finditer(r'(?<![\d.,])([1\[]?\s*[\d.,]{3,8})\s*%\s*\]', text):
         p = _pct_from_bracket_tail(bm.group(1))
+        detail["candidates"].append({
+            "mode": "bracket_tail",
+            "token": bm.group(1),
+            "pct": p,
+        })
         if p is None: continue
         # EXP 在此 match 之前
-        return _exp(text[:bm.start()].strip()), p
+        detail.update({
+            "exp": _exp(text[:bm.start()].strip()),
+            "pct": p,
+            "mode": "bracket_tail",
+            "reason": "ok",
+        })
+        return detail
 
     # ── 寬鬆：找緊接 % 的小數（不管有無括號）────────────────────────────────
     # 從右往左找第一個 XX.X% / XX.XXX% 格式（EXP% 必在文字末段）
     for m in reversed(list(re.finditer(r'(\d{1,3}[.,]\d{1,3})\s*%', text))):
         p = _pct(m.group(1))
-        if p is None: continue
+        candidate = {
+            "mode": "loose_percent",
+            "token": m.group(1),
+            "pct": p,
+        }
+        if p is None:
+            detail["candidates"].append(candidate)
+            continue
         try:
             if 1.0 <= float(p) <= 99.999:
-                return _exp(text[:m.start()].strip()), p
-        except: pass
+                candidate["accepted"] = True
+                detail["candidates"].append(candidate)
+                detail.update({
+                    "exp": _exp(text[:m.start()].strip()),
+                    "pct": p,
+                    "mode": "loose_percent",
+                    "reason": "ok",
+                })
+                return detail
+            candidate["accepted"] = False
+            candidate["reject_reason"] = "outside_monitor_range"
+        except Exception as e:
+            candidate["accepted"] = False
+            candidate["reject_reason"] = repr(e)
+        detail["candidates"].append(candidate)
+
+    if not re.search(r'\d', text):
+        detail["reason"] = "no_digits"
+    elif detail["candidates"]:
+        if any(c.get("pct") is not None for c in detail["candidates"]):
+            detail["reason"] = "pct_out_of_monitor_range"
+        else:
+            detail["reason"] = "pct_candidate_invalid"
+    elif re.search(r'[%\[\]]', text):
+        detail["reason"] = "pct_marker_without_number"
+    elif re.search(r'\d+[.,]\d+', text):
+        detail["reason"] = "decimal_without_percent"
+    else:
+        detail["reason"] = "digits_without_pct"
+    return detail
+
+
+def parse(raw):
+    detail = parse_detail(raw)
+    return detail["exp"], detail["pct"]
+
+
+def _short_text(value, limit=96):
+    value = str(value or "").replace("\r", "\\r").replace("\n", "\\n")
+    if len(value) <= limit:
+        return value
+    return value[:max(0, limit - 3)] + "..."
+
+
+def format_parse_failure(detail, raw_limit=96):
+    if not isinstance(detail, dict):
+        detail = parse_detail(detail)
+
+    labels = {
+        "ok": "解析成功",
+        "ocr_empty": "OCR 沒有回傳文字",
+        "normalized_empty": "OCR 正規化後沒有可解析文字",
+        "no_digits": "OCR 結果沒有數字",
+        "pct_candidate_invalid": "找到百分比候選，但格式或範圍不合法",
+        "pct_out_of_monitor_range": "找到百分比候選，但不在監控接受範圍 1.000~99.999",
+        "pct_marker_without_number": "有 % 或括號標記，但抓不到有效百分比數字",
+        "decimal_without_percent": "有小數數字，但缺少 % 或右括號",
+        "digits_without_pct": "有數字，但不是 EXP% 格式",
+    }
+    reason = detail.get("reason") or "unknown"
+    parts = [labels.get(reason, reason)]
+
+    candidates = detail.get("candidates") or []
+    if candidates:
+        shown = []
+        for item in candidates[:3]:
+            token = _short_text(item.get("token"), 24)
+            pct = item.get("pct")
+            if pct is None:
+                shown.append(f"{item.get('mode', '?')}:{token}->invalid")
+            else:
+                suffix = ""
+                if item.get("reject_reason"):
+                    suffix = f"/{item.get('reject_reason')}"
+                shown.append(f"{item.get('mode', '?')}:{token}->{pct}{suffix}")
+        if len(candidates) > 3:
+            shown.append(f"+{len(candidates) - 3} more")
+        parts.append("candidates=" + ", ".join(shown))
+
+    raw = detail.get("raw") or ""
+    normalized = detail.get("normalized") or ""
+    if raw:
+        parts.append(f"raw='{_short_text(raw, raw_limit)}'")
+    if normalized and normalized != raw:
+        parts.append(f"normalized='{_short_text(normalized, raw_limit)}'")
+    if detail.get("ocr_error"):
+        parts.append(f"ocr_error='{_short_text(detail.get('ocr_error'), raw_limit)}'")
+    return "; ".join(parts)
 
     return None, None
 
@@ -785,8 +925,12 @@ def run_debug():
         wpx = int(np.sum(mask > 0))
         cv2.imwrite(os.path.join(DEBUG_DIR, f"dbg_mask_{name}.png"), mask)
         raw, eng = run_ocr(mask, paddle_ready)
-        e, p = parse(raw)
-        print(f"  {name:6s} white={wpx:7d}  [{eng}] {raw!r:35s}  → pct={p} exp={e}")
+        detail = parse_detail(raw)
+        if not raw and OCR_LAST_ERROR:
+            detail["ocr_error"] = OCR_LAST_ERROR
+        e, p = detail["exp"], detail["pct"]
+        reason = "" if p else "  reason=" + format_parse_failure(detail)
+        print(f"  {name:6s} white={wpx:7d}  [{eng}] {raw!r:35s}  → pct={p} exp={e}{reason}")
 
     print(f"\n[INFO] 圖片已存至 {os.path.abspath(DEBUG_DIR)}/")
 
@@ -827,10 +971,15 @@ def run_monitor(interval, exp_digits=0):
             exp_row = band[:, x0:x1]
 
             best_e, best_p = None, None
-            for _, mask in preprocess(exp_row):
+            failures = []
+            for name, mask in preprocess(exp_row):
                 raw, _ = run_ocr(mask, paddle_ready)
-                if not raw: continue
-                e, p = parse(raw)
+                detail = parse_detail(raw)
+                detail["name"] = name
+                if not raw and OCR_LAST_ERROR:
+                    detail["ocr_error"] = OCR_LAST_ERROR
+                failures.append(detail)
+                e, p = detail["exp"], detail["pct"]
                 sc = (1 if p else 0) + (1 if e else 0)
                 bs = (1 if best_p else 0) + (1 if best_e else 0)
                 if sc > bs:
@@ -848,7 +997,11 @@ def run_monitor(interval, exp_digits=0):
                 prev_pct = best_p
             else:
                 ts2 = _ts()
-                print(f"[{ts2}] OCR no result [{cap}]")
+                reason = " | ".join(
+                    f"{d.get('name', '?')}: {format_parse_failure(d)}"
+                    for d in failures[:3]
+                ) or "no preprocess result"
+                print(f"[{ts2}] OCR/parse failed [{cap}] {reason}")
             time.sleep(interval)
         except KeyboardInterrupt:
             break
